@@ -511,6 +511,12 @@ void TelnetParser::apply_sgr(const std::vector<int>& codes) {
                 style.fg = encode_truecolor(static_cast<uint8_t>(codes[i + 2]), static_cast<uint8_t>(codes[i + 3]),
                                              static_cast<uint8_t>(codes[i + 4]));
                 i += 4;
+            } else {
+                // Truncated extended-color sequence (missing index/RGB
+                // components): abandon the rest of this SGR sequence rather
+                // than reinterpreting the leftover sub-parameters (e.g. the
+                // "5" in a bare "38;5") as independent top-level codes.
+                break;
             }
         } else if (code == 39) {
             style.fg = default_fg;
@@ -524,6 +530,8 @@ void TelnetParser::apply_sgr(const std::vector<int>& codes) {
                 style.bg = encode_truecolor(static_cast<uint8_t>(codes[i + 2]), static_cast<uint8_t>(codes[i + 3]),
                                              static_cast<uint8_t>(codes[i + 4]));
                 i += 4;
+            } else {
+                break; // truncated extended-color sequence; see the 38 case above
             }
         } else if (code == 49) {
             style.bg = default_bg;

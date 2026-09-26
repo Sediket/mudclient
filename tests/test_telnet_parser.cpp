@@ -244,6 +244,17 @@ TEST_CASE("ANSI: attribute set/reset codes", "[parser][ansi]") {
     CHECK(line.spans[1] == StyledSpan{TextStyle{}, 1, 2});
 }
 
+TEST_CASE("ANSI: truncated extended-color sequence abandons the rest of the SGR, not reinterpreted", "[parser][ansi]") {
+    // "38;5" with no index must not fall through and reinterpret the "5" as
+    // a bare SGR code (blink). The whole sequence is simply dropped.
+    auto r = check_every_split("\x1b[38;5mA\x1b[38;2;9;9mB\n");
+    const auto& line = line_at(r, 0);
+    CHECK(line.plain == "AB");
+    REQUIRE(line.spans.size() == 1);
+    CHECK(line.spans[0].style.flags == 0);
+    CHECK(line.spans[0].style.fg == mudclient::default_fg);
+}
+
 TEST_CASE("ANSI: non-SGR CSI and bare ESC are consumed silently", "[parser][split][ansi]") {
     auto r = check_every_split("\x1b[2J\x1b[10;5Habc\x1b[?25l\x1b" "Xd\n");
     CHECK(line_at(r, 0).plain == "abcXd");
