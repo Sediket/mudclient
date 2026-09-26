@@ -50,6 +50,21 @@ FetchContent_Declare(nlohmann_json
     SYSTEM)
 FetchContent_MakeAvailable(nlohmann_json)
 
+set(PCRE2_BUILD_TESTS OFF CACHE INTERNAL "")
+set(PCRE2_BUILD_PCRE2GREP OFF CACHE INTERNAL "")
+set(PCRE2_BUILD_PCRE2TEST OFF CACHE INTERNAL "")
+set(PCRE2_BUILD_PCRE2GPERF OFF CACHE INTERNAL "")
+set(PCRE2_BUILD_DOCS OFF CACHE INTERNAL "")
+set(PCRE2_SUPPORT_JIT ON CACHE INTERNAL "")
+set(PCRE2_STATIC_PIC ON CACHE INTERNAL "")
+set(BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
+FetchContent_Declare(pcre2
+    GIT_REPOSITORY https://github.com/PCRE2Project/pcre2.git
+    GIT_TAG pcre2-10.45
+    GIT_SHALLOW ON
+    SYSTEM)
+FetchContent_MakeAvailable(pcre2)
+
 if(ENABLE_TESTS)
     FetchContent_Declare(Catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git
@@ -84,10 +99,15 @@ endif()
 add_library(mudclient_core STATIC
     src/telnet_parser.cpp
     src/network_client.cpp
-    src/platform/console.cpp)
+    src/platform/console.cpp
+    src/regex_pattern.cpp
+    src/timer_manager.cpp
+    src/trigger_manager.cpp
+    src/alias_manager.cpp
+    src/command_parser.cpp)
 target_include_directories(mudclient_core PUBLIC include PRIVATE src)
 target_link_libraries(mudclient_core
-    PUBLIC asio_standalone nlohmann_json::nlohmann_json Threads::Threads
+    PUBLIC asio_standalone nlohmann_json::nlohmann_json Threads::Threads pcre2-8-static
     PRIVATE mudclient_options)
 target_compile_options(mudclient_core PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 if(WIN32)
@@ -108,6 +128,10 @@ target_compile_definitions(mudclient PRIVATE MUDCLIENT_VERSION="${MUDCLIENT_VERS
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND NOT ENABLE_ASAN)
     target_link_options(mudclient PRIVATE -static-libstdc++ -static-libgcc)
 endif()
+
+# ---- Benchmarks ----
+
+add_subdirectory(bench)
 
 # ---- Tests ----
 
