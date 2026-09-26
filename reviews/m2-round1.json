@@ -1,0 +1,50 @@
+{
+  "milestone": "M2",
+  "commit": "a357763d5aaea8cdd6d1172294f56cec4f71db63",
+  "verdict": "REQUEST_CHANGES",
+  "exit_commands": [
+    { "command": "cmake --preset release && cmake --build --preset release", "exit_code": 0 },
+    { "command": "ctest --preset release --output-on-failure", "exit_code": 0 },
+    { "command": "cmake --preset asan && cmake --build --preset asan && ctest --preset asan", "exit_code": 0 },
+    { "command": "./build/release/bench/trigger_bench --min-lines-per-sec 2000", "exit_code": 0 }
+  ],
+  "findings": [
+    {
+      "id": "M2-F1",
+      "severity": "blocking",
+      "category": "correctness",
+      "location": "src/regex_pattern.cpp:179-196 (extract_required_literal, quantifier handling); consumed by src/trigger_manager.cpp:79",
+      "description": "extract_required_literal() pops only one byte off the pending literal run when an atom is followed by *, ?, or {, but PCRE2 compiles patterns with PCRE2_UTF|PCRE2_UCP so a quantified multi-byte UTF-8 codepoint (e.g. an optional accented letter, curly quote, or emoji) has only its trailing byte removed. The leading bytes of that codepoint remain in the run and can be promoted to a 'required literal' even though the character they came from is entirely optional. This violates both the header's documented safety property and SPEC.md section 3's explicit prefilter requirement.",
+      "evidence": "extract_required_literal(\"\\xF0\\x9F\\x98\\x80?xyz\", 3) returned the invalid 3-byte sequence \\xf0\\x9f\\x98 as 'required', while CompiledRegex for that same pattern matches the plain line \"xyz\" (no emoji) just fine.",
+      "spec_ref": "docs/SPEC.md section 3, Triggers, prefilter step 2: 'The prefilter must never skip a regex that would have matched.'"
+    },
+    {
+      "id": "M2-F2",
+      "severity": "blocking",
+      "category": "concurrency",
+      "location": "src/alias_manager.cpp:151 (AliasManager::expand_recursive) vs. src/trigger_manager.cpp:97-100 (TriggerManager::process_line)",
+      "description": "AliasManager::expand_recursive called the alias's FunctionAction via std::get<FunctionAction>(a->action)(captures), where `a` is a raw pointer into the aliases_ vector obtained via find(id). Unlike TriggerManager::process_line, which explicitly copies the Action out into a local variable before invoking it, AliasManager invoked the callback while still holding a live pointer into the vector's backing storage. If the callback caused aliases_ to reallocate (e.g. by registering enough new aliases), the std::function object being executed was destroyed/moved out from under itself mid-call.",
+      "evidence": "A FunctionAction that removes itself then adds 500 aliases segfaulted under ASan with a stack trace through expand_recursive -> std::get<FunctionAction>(a->action)(captures), reproduced against the pristine (unmutated) checked-out src/alias_manager.cpp. The shipped regression test only added one alias in its callback and never forced a reallocation, so it passed despite the bug.",
+      "spec_ref": "docs/agents/CRITIC.md 'Threading' guidance on Action/FunctionAction lifetimes after mutation; docs/SPEC.md section 3 Aliases (recursive re-evaluation of expansions)"
+    },
+    {
+      "id": "M2-F3",
+      "severity": "blocking",
+      "category": "test-integrity",
+      "location": "src/timer_manager.cpp (TimerManager::handle_fire generation check); tests/test_timer_manager.cpp",
+      "description": "Deleting the 'if (entry.generation != expected_generation) return;' check in handle_fire caused 0 of the 99 shipped tests to fail. HANDOFF bug #4's fix (pausing immediately after registration, before any tick can possibly have fired) specifically removed the only test scenario that could have exercised this race, leaving the spec-mandated generation-counter safety property with zero regression-test coverage.",
+      "evidence": "Mutation applied (reverted after testing): removed the generation check in handle_fire; ctest --preset release and ctest --preset asan both still reported 100% tests passed, 0 failed out of 99 (run 10x to rule out flakiness). A separate stress test racing pause() against a repeating 5ms timer's own deadline from a second thread showed 0 leaked ticks across 1200 trials with the check present vs. ~1800-2000 leaked ticks per 400 trials with it removed.",
+      "spec_ref": "docs/SPEC.md section 3, Timers: 'Every handler checks a per-timer generation counter incremented on cancel/pause/reset/kill; stale generations are ignored.'; docs/agents/CRITIC.md 'Mutation check' instruction."
+    },
+    {
+      "id": "M2-F4",
+      "severity": "minor",
+      "category": "test-integrity",
+      "location": "HANDOFF.md line 5",
+      "description": "HANDOFF.md's 'Commit SHA (review this one)' field cited the commit one behind the actual m2 branch tip (which only added/edited HANDOFF.md itself) -- same pattern as the already-adjudicated, non-blocking M1-F1 finding, recurring in M2.",
+      "evidence": "git log showed the tip as the child of the cited commit; the only diff between the two was HANDOFF.md, and a separate CI run for the actual tip was independently verified green on all matrix jobs.",
+      "spec_ref": "docs/agents/CRITIC.md, 'Verify, don't trust': 'Confirm cited CI runs are for that exact SHA and green on every matrix entry.'"
+    }
+  ],
+  "disputes_adjudicated": []
+}

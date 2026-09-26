@@ -1,0 +1,29 @@
+{
+  "milestone": "M2",
+  "commit": "1297db18edeb471206905eed94ef75d6678297c1",
+  "verdict": "APPROVE",
+  "exit_commands": [
+    { "command": "cmake --preset release && cmake --build --preset release", "exit_code": 0 },
+    { "command": "ctest --preset release --output-on-failure", "exit_code": 0 },
+    { "command": "cmake --preset asan && cmake --build --preset asan && ctest --preset asan", "exit_code": 0 },
+    { "command": "./build/release/bench/trigger_bench --min-lines-per-sec 2000", "exit_code": 0 }
+  ],
+  "findings": [],
+  "disputes_adjudicated": [
+    {
+      "id": "M2-F1",
+      "upheld": false,
+      "reason": "Fix holds. src/regex_pattern.cpp now has pop_last_utf8_codepoint(), which walks back over UTF-8 continuation bytes (mask 0xC0==0x80) to find the true lead byte before trimming, instead of popping one byte. Re-derived the original repro against the fixed code: extract_required_literal(\"\\xF0\\x9F\\x98\\x80?xyz\", 3) now correctly returns \"xyz\" with no stray emoji bytes, and CompiledRegex confirms the plain line \"xyz\" still matches. Mutation check: reverted pop_last_utf8_codepoint back to a plain current_run.pop_back(), rebuilt, and the new regression test failed exactly as expected. Reverted the mutation; full suite is clean again."
+    },
+    {
+      "id": "M2-F2",
+      "upheld": false,
+      "reason": "Fix holds. src/alias_manager.cpp now copies `Action action = a->action;` and `bool fall_through = a->opts.fall_through;` out of the vector entry before invoking the callback, mirroring TriggerManager::process_line. The regression test was strengthened exactly as HANDOFF claims: it removes itself then adds 500 aliases from inside the callback. Ran clean under ASan with the fix in place. Reverted the fix in a clone (restored the raw-pointer invocation), rebuilt, and reran: reproduced a real heap-buffer-overflow via ASan, the same failure mode round 1 found. Reverted the mutation; ASan build is clean again."
+    },
+    {
+      "id": "M2-F3",
+      "upheld": false,
+      "reason": "Fix holds and closes the coverage gap. The new test deliberately races pause() against a 2ms repeating timer's own deadline across 20 trials, watching 8 interval-widths afterward, and asserts leaked ticks <= 20. Independently removed the generation check in handle_fire, rebuilt, and ran just this test -- it failed clearly (126 leaked ticks vs. threshold 20, ~6x overshoot), confirming real coverage. Reverted the mutation; full release suite (102/102) passes again with the real check restored."
+    }
+  ]
+}

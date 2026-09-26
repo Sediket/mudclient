@@ -1,0 +1,2 @@
+add_executable(trigger_bench trigger_bench.cpp)
+target_link_libraries(trigger_bench PRIVATE mudclient_core mudclient_options)
