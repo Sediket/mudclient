@@ -14,7 +14,8 @@ add_executable(mudclient_tests
     test_lua_escaping.cpp
     critic/critic_lua_sandbox.cpp
     critic/critic_lua_coroutine_budget_amplification.cpp
-    critic/critic_reset_timer_binding_coverage.cpp)
+    critic/critic_reset_timer_binding_coverage.cpp
+    critic/critic_pump_resumes_shared_budget.cpp)
 target_link_libraries(mudclient_tests PRIVATE mudclient_core mudclient_options Catch2::Catch2WithMain)
 
 catch_discover_tests(mudclient_tests DISCOVERY_MODE PRE_TEST)

@@ -246,6 +246,53 @@ tested, and not going to change shape once the fixture itself is redone.
   replay test — has been extensively validated. `command_parser` itself is
   unit-tested standalone for shape/parsing correctness independent of this.
 
+## Response to M3 round 4 findings (`reviews/m3-round4.json`, ESCALATE) — final round
+
+Round 4 (the last in `docs/agents/PROTOCOL.md`'s max-4-round budget)
+independently re-verified rounds 2 and 3's fixes via fresh mutation
+testing (not just trusting commit messages), did a broader pass over
+areas earlier rounds hadn't focused on as heavily (GMCP cache edge cases,
+session_recorder, main.cpp's CLI/shutdown, trigger/alias reentrancy under
+real `sol::protected_function` callbacks), found nothing new blocking in
+any of it, and confirmed M3-F1 (the network-blocked live-test fixture)
+unchanged for the fourth time. One new finding:
+
+- **M3-NEW-5 (major, non-blocking): left as a documented limitation, not
+  fixed.** `pump_resumes()`'s drain loop shares one instruction budget
+  across every coroutine resume it drains in a single call, rather than
+  giving each its own fresh budget the way every other guarded entry
+  point does. This can make an individually-legitimate, budget-compliant
+  continuation fail purely because of what else was queued in the same
+  drain — a real deviation from SPEC.md §4's "aborts any single callback"
+  framing in this specific case, but one that fails *safe* (more
+  conservative than intended, never less), requires a specific
+  concurrency pattern (multiple `wait_for`/`sleep` continuations resolving
+  from the same dispatch) to manifest, and doesn't affect any exit
+  command or existing test. Wired the Critic's own characterization test
+  (`tests/critic/critic_pump_resumes_shared_budget.cpp`) into the build as
+  permanent documentation/regression coverage of this specific, accepted
+  behavior (it asserts what actually happens today, not a "should"), but
+  did not change `pump_resumes()`'s design — giving each drained resume
+  its own fresh guard would need more thought than this final round's
+  scope warrants (in particular, deciding whether "per top-level dispatch"
+  or "per resumed coroutine" is the right unit for the budget is a design
+  question, not a bug fix).
+
+**This is the milestone's 4th and final scheduled Critic round.** Every
+code-level finding across all 4 rounds is now resolved or explicitly,
+knowingly accepted as a documented non-blocking limitation (M3-NEW-5).
+The only outstanding item, upheld unchanged across all 4 rounds, is
+M3-F1 — see `ESCALATION.md`'s final update for the full status and why
+I'm not merging `m3` to `main` without either a formal Critic APPROVE or
+explicit user direction, given the milestone's own completion rule
+(`docs/SPEC.md`'s "Milestones" section: "complete only when every exit
+command exits 0... and the Critic has issued APPROVE") is not met by an
+ESCALATE verdict, and `docs/agents/PROTOCOL.md`'s loop only authorizes
+merging on APPROVE.
+
+All fixes verified together: `ctest --preset release`/`asan` both
+129/129 (was 128; +1 from wiring in the Critic's characterization test).
+
 ## Response to M3 round 3 findings (`reviews/m3-round3.json`, REQUEST_CHANGES)
 
 Round 3 confirmed M3-NEW-1 (round 2's blocking finding) is genuinely fixed

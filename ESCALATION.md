@@ -68,3 +68,40 @@ commit that accompanies this file and the updated `HANDOFF.md`. I have not
 stopped work; this file exists so the one genuinely-blocked item has a
 clear, durable record independent of chat history, per
 `docs/agents/PROTOCOL.md`'s escalation requirement.
+
+## Update: all 4 Critic review rounds complete (round budget exhausted)
+
+`docs/agents/PROTOCOL.md` caps the review loop at 4 rounds per milestone.
+M3 has now had all 4:
+
+- **Round 1** (`reviews/m3-round1.json`): REQUEST_CHANGES — 1 blocking
+  (M3-F1, this network item) + 3 non-blocking findings. All 3
+  non-blocking findings fixed.
+- **Round 2** (`reviews/m3-round2.json`): ESCALATE — M3-F1 upheld
+  (independently re-confirmed the network block from the Critic's own
+  environment); found and I fixed a real, separate security bug
+  (instruction-budget amplification via repeated coroutine creation) plus
+  a test-coverage gap.
+- **Round 3** (`reviews/m3-round3.json`): REQUEST_CHANGES — confirmed
+  round 2's fixes were genuine (via the Critic's own mutation testing);
+  found and I fixed a real test-integrity gap (a reset_timer test that
+  passed against a no-op binding) plus a minor defense-in-depth gap.
+- **Round 4** (`reviews/m3-round4.json`): ESCALATE — confirmed round 3's
+  fixes were genuine (again via mutation testing); found one new
+  non-blocking finding (M3-NEW-5, `pump_resumes` sharing one instruction
+  budget across a batch of drained coroutine resumes — fails safe, no
+  exit command or existing test affected, left as a documented, not
+  currently actioned, limitation); **M3-F1 is the only remaining blocking
+  item, upheld unchanged for the fourth time.**
+
+**Every code-level finding across all 4 rounds is resolved.** The only
+open item, in all 4 rounds, is this same network access blocker. The
+milestone cannot receive a formal APPROVE (`docs/SPEC.md`'s own
+milestone-completion rule requires "every exit command exits 0," and the
+live-run exit command has never been attempted successfully) without it —
+this is exactly the situation `docs/agents/PROTOCOL.md`'s "a limit is
+hit" escalation trigger describes, on top of the network-access trigger
+already documented above. I'm not merging PR #3 without either a formal
+APPROVE or explicit direction from the user to proceed anyway, since the
+protocol's merge step is gated on APPROVE. Bringing this to the user now
+rather than spawning a 5th review round.
