@@ -51,6 +51,10 @@ public:
     bool exit_requested() const { return exit_requested_; }
     int exit_code() const { return exit_code_; }
 
+    // Optional --log-transcript sink: called with the ANSI-stripped plain
+    // text of every displayed (non-gagged) line.
+    void set_transcript_sink(std::function<void(const std::string&)> sink) { transcript_ = std::move(sink); }
+
     const std::vector<std::string>& sent_log() const { return sent_log_; }
 
     TriggerManager& triggers() { return triggers_; }
@@ -91,6 +95,7 @@ private:
     // one-shot timer fires or the timer is killed.
     std::unordered_map<uint64_t, std::pair<sol::protected_function, bool>> timer_callbacks_;
     std::vector<std::string> sent_log_;
+    std::function<void(const std::string&)> transcript_;
 
     bool exit_requested_ = false;
     int exit_code_ = 0;

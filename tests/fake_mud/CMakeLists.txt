@@ -1,0 +1,2 @@
+add_executable(fake_mud fake_mud.cpp)
+target_link_libraries(fake_mud PRIVATE mudclient_core mudclient_options)

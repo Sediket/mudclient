@@ -67,6 +67,9 @@ void NetworkClient::connect(std::string host, std::string port, std::chrono::mil
 }
 
 void NetworkClient::send_line(std::string line) {
+    if (recorder_) {
+        recorder_(false, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(line.data()), line.size()));
+    }
     std::string escaped;
     escaped.reserve(line.size() + 2);
     for (char c : line) {
@@ -117,6 +120,9 @@ void NetworkClient::start_read() {
             return;
         }
 
+        if (recorder_) {
+            recorder_(true, std::span<const uint8_t>(read_buffer_.data(), n));
+        }
         std::vector<TelnetParser::OutputEvent> out_events;
         std::string out_to_send;
         parser_.feed(std::span<const uint8_t>(read_buffer_.data(), n), out_events, out_to_send);

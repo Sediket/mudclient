@@ -132,7 +132,8 @@ add_library(mudclient_core STATIC
     src/alias_manager.cpp
     src/command_parser.cpp
     src/gmcp_cache.cpp
-    src/script_engine.cpp)
+    src/script_engine.cpp
+    src/session_recorder.cpp)
 target_include_directories(mudclient_core PUBLIC include PRIVATE src)
 target_link_libraries(mudclient_core
     PUBLIC asio_standalone nlohmann_json::nlohmann_json Threads::Threads pcre2-8-static lua54 sol2
@@ -166,6 +167,7 @@ add_subdirectory(bench)
 if(ENABLE_TESTS)
     enable_testing()
     add_subdirectory(tests)
+    add_subdirectory(tests/fake_mud)
 endif()
 
 # ---- Install / packaging ----

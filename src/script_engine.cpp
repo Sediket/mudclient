@@ -79,7 +79,7 @@ function client.wait_for(pattern, timeout)
     trigger_id = client.register_trigger(pattern, function(captures)
         cleanup()
         client._queue_resume(co, captures)
-    end, { once = true })
+    end, { once = true, match_prompts = true })
     timer_id = client.register_timer(timeout, function()
         cleanup()
         client._queue_resume(co, nil)
@@ -515,6 +515,9 @@ void ScriptEngine::dispatch_line(const StyledLine& line) {
     }
     if (!outcome.gag) {
         render_line(display);
+        if (transcript_) {
+            transcript_(display.plain);
+        }
     }
     call_event_handlers("line", make_line_table(display));
     pump_resumes();

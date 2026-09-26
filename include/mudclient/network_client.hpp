@@ -3,7 +3,9 @@
 #include <array>
 #include <chrono>
 #include <deque>
+#include <functional>
 #include <memory>
+#include <span>
 #include <string>
 
 #include <asio.hpp>
@@ -42,6 +44,15 @@ public:
 
     bool connected() const { return connected_; }
 
+    // Optional --record sink: called with every raw inbound chunk exactly
+    // as read from the socket (before telnet/ANSI parsing, preserving
+    // original chunk boundaries) and every outbound line (as passed to
+    // send_line, before \r\n termination/0xFF escaping). Set before
+    // connect(); safe to call only on the network thread (i.e. via
+    // asio::post like every other NetworkClient entry point).
+    using Recorder = std::function<void(bool inbound, std::span<const uint8_t> data)>;
+    void set_recorder(Recorder recorder) { recorder_ = std::move(recorder); }
+
 private:
     void start_read();
     void do_write();
@@ -61,6 +72,7 @@ private:
 
     TelnetParser parser_;
     EventQueue& events_;
+    Recorder recorder_;
 
     bool connected_ = false;
     bool stopped_ = false;
