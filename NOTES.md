@@ -9,4 +9,4 @@ Persistent log of decisions, assumptions, and spec deviations. Every deviation i
 
 ## Deviations tracker (append as they occur)
 
-(none yet)
+- **Bootstrap commit pushed directly to `main` instead of via PR.** The remote repository had zero commits and no `main` ref, so a pull request (which requires an existing base branch) was not possible for the very first commit. Pushed the bootstrap commit directly to establish `main`, then created `m1` from it. All subsequent milestone work goes through PRs as specified.
