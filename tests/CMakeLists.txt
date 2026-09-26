@@ -11,7 +11,9 @@ add_executable(mudclient_tests
     test_alias_manager.cpp
     test_command_parser.cpp
     test_script_engine.cpp
-    critic/critic_lua_sandbox.cpp)
+    test_lua_escaping.cpp
+    critic/critic_lua_sandbox.cpp
+    critic/critic_lua_coroutine_budget_amplification.cpp)
 target_link_libraries(mudclient_tests PRIVATE mudclient_core mudclient_options Catch2::Catch2WithMain)
 
 catch_discover_tests(mudclient_tests DISCOVERY_MODE PRE_TEST)

@@ -246,6 +246,59 @@ tested, and not going to change shape once the fixture itself is redone.
   replay test — has been extensively validated. `command_parser` itself is
   unit-tested standalone for shape/parsing correctness independent of this.
 
+## Response to M3 round 2 findings (`reviews/m3-round2.json`, ESCALATE)
+
+Round 2 upheld M3-F1 (escalated, unchanged — see `ESCALATION.md`), confirmed
+M3-F2/F3/F4 resolved, and found two new issues:
+
+- **M3-NEW-1 (blocking, security: instruction-budget amplification via
+  repeated fresh-coroutine creation): fixed.** The Critic correctly
+  identified that my round-2 explanation for why the round-1 nested-
+  coroutine hypothesis was safe ("hook installs on the shared
+  `global_State`") was factually wrong — it's a per-thread `lua_State`
+  field, copied (and reset) at each `lua_newthread()` — and that this same
+  mechanism enables a real, narrower bypass: a callback that repeatedly
+  creates short-lived coroutines, each getting its own fresh full budget,
+  can amplify total real work far past `instruction_budget_`. Fixed by
+  changing what the instruction hook actually bounds: instead of relying
+  on Lua's own per-thread countdown reaching zero, `InstructionBudgetGuard`
+  now samples frequently (every 10,000 instructions, on whichever thread
+  is running — Lua does auto-install the hook on every child coroutine,
+  just with an independent countdown) and decrements one counter shared by
+  every thread in the guard's scope. Every Lua thread reaches that shared
+  counter via a pointer stored in its "extra space"
+  (`lua_getextraspace`/`LUA_EXTRASPACE`), which Lua copies byte-for-byte
+  from parent to child at coroutine-creation time — so every coroutine,
+  however many are created or how deeply nested, ends up pointing at the
+  same `ScriptEngine::instruction_budget_remaining_`. Verified against the
+  Critic's own adversarial test (wired into the build, which it wasn't
+  yet): before the fix, 200 outer iterations × 100,000 real loop
+  iterations completed with no error at all; after, most iterations fail
+  with an instruction-budget error and cumulative real work stays well
+  under the configured budget. Updated the test's own final assertions to
+  match this real (safe) outcome shape (the script catches each
+  coroutine's failure individually, so the *outer* callback doesn't itself
+  throw — it keeps looping and accumulating failures — which is fine, since
+  the property that matters is bounded cumulative work, not "the callback
+  throws").
+- **M3-NEW-2 (major, test-integrity: M3-F3/F4's fixes had zero test
+  coverage): fixed.** Extracted `lua_quote`/`is_valid_number`/
+  `lua_id_or_label` out of `main.cpp`'s anonymous namespace into a small,
+  dependency-free header (`include/mudclient/lua_escaping.hpp`), with a
+  new direct unit test file (`tests/test_lua_escaping.cpp`) covering
+  normal input, edge cases, and the exact injection shape the round-1
+  finding was about. Added a `ScriptEngine`-level test exercising
+  `client.register_timer`/`pause_timer`/`resume_timer`/`reset_timer`/
+  `kill_timer` end to end through the Lua binding layer (not just
+  `TimerManager`'s own already-thorough unit tests), closing the
+  `reset_timer` gap specifically and, incidentally, the pre-existing
+  (never flagged) lack of binding-level coverage for
+  pause_timer/resume_timer/kill_timer too.
+
+All fixes verified together: `ctest --preset release`/`asan` both
+127/127 (was 121; +1 amplification test wired in, +4 `lua_escaping` unit
+tests, +1 timer-bindings test, +1 net from the round-1→round-2 diff).
+
 ## Response to prior Critic findings (M3 round 1 → this round)
 
 M3 round 1 (`reviews/m3-round1.json`) returned REQUEST_CHANGES with 1

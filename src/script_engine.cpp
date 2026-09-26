@@ -1,6 +1,7 @@
 #include "mudclient/script_engine.hpp"
 
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <future>
 #include <optional>
@@ -11,19 +12,54 @@ namespace mudclient {
 
 namespace {
 
-// LUA_MASKCOUNT hook: fires every `instruction_budget_` VM instructions
-// since the hook was (re)installed. Raising a Lua error here unwinds back
-// to the nearest protected call boundary (our sol::protected_function
-// invocation), which is exactly what "abort this callback" means -- it
-// cannot escape past that boundary, so a runaway script can't hang or
-// crash the client.
+// LUA_MASKCOUNT hook, sampled every kHookSampleInterval VM instructions.
+// Raising a Lua error here unwinds back to the nearest protected call
+// boundary (our sol::protected_function invocation), which is exactly
+// what "abort this callback" means -- it cannot escape past that
+// boundary, so a runaway script can't hang or crash the client.
+//
+// This does NOT rely on Lua's own per-thread hookcount reaching zero
+// (which is what a naive `lua_sethook(L, hook, LUA_MASKCOUNT, budget)`
+// does): a real bug the M3 Critic found is that lua_newthread() (behind
+// coroutine.create()) copies hookmask/hook/basehookcount from the
+// creating thread but then calls resethookcount() on the new thread --
+// so every freshly created coroutine gets its OWN full, independently-
+// ticking budget, decoupled from how much of the creating thread's
+// budget is already spent. A callback that repeatedly creates a
+// short-lived coroutine, lets it do just-under-budget real work, and
+// discards it, could amplify total work far past the configured budget.
+//
+// Fix: fire the hook frequently (every kHookSampleInterval instructions,
+// on WHICHEVER thread is currently running -- Lua does auto-install the
+// same hook/mask on every child coroutine, just with its own countdown)
+// and have it decrement one shared counter instead of relying on any
+// per-thread countdown reaching zero. The shared counter lives in
+// ScriptEngine::instruction_budget_remaining_; every Lua thread reaches
+// it via a pointer stored in that thread's "extra space"
+// (lua_getextraspace), which Lua also copies byte-for-byte from parent to
+// child at lua_newthread() time (see LUA_EXTRASPACE in luaconf.h) -- so
+// every coroutine, however deeply nested or however many are created,
+// automatically inherits the same pointer and draws down the same total.
+constexpr int kHookSampleInterval = 10'000;
+
 void instruction_hook(lua_State* L, lua_Debug*) {
-    luaL_error(L, "script exceeded its instruction budget (possible infinite loop)");
+    long* remaining;
+    std::memcpy(&remaining, lua_getextraspace(L), sizeof(remaining));
+    *remaining -= kHookSampleInterval;
+    if (*remaining <= 0) {
+        luaL_error(L, "script exceeded its instruction budget (possible infinite loop)");
+    }
 }
 
 class InstructionBudgetGuard {
 public:
-    InstructionBudgetGuard(lua_State* L, int budget) : L_(L) { lua_sethook(L_, instruction_hook, LUA_MASKCOUNT, budget); }
+    // `remaining` is ScriptEngine::instruction_budget_remaining_ -- reset
+    // to `budget` for this guard's whole scope, shared by every coroutine
+    // created while it's active (see instruction_hook's comment above).
+    InstructionBudgetGuard(lua_State* L, long budget, long& remaining) : L_(L) {
+        remaining = budget;
+        lua_sethook(L_, instruction_hook, LUA_MASKCOUNT, kHookSampleInterval);
+    }
     ~InstructionBudgetGuard() { lua_sethook(L_, nullptr, 0, 0); }
     InstructionBudgetGuard(const InstructionBudgetGuard&) = delete;
     InstructionBudgetGuard& operator=(const InstructionBudgetGuard&) = delete;
@@ -109,6 +145,15 @@ ScriptEngine::ScriptEngine(NetworkClient& network, asio::io_context& network_io,
 void ScriptEngine::install_sandbox() {
     lua_.open_libraries(sol::lib::base, sol::lib::string, sol::lib::table, sol::lib::math, sol::lib::utf8,
                          sol::lib::coroutine);
+
+    // Written once: a pointer to instruction_budget_remaining_, which every
+    // InstructionBudgetGuard resets for its own scope. Lua copies this
+    // thread's extra space byte-for-byte into every coroutine created from
+    // it (lua_newthread), so every coroutine -- however many are created,
+    // however deeply nested -- ends up with the same pointer and so draws
+    // on the same shared counter. See InstructionBudgetGuard's comment.
+    long* remaining_ptr = &instruction_budget_remaining_;
+    std::memcpy(lua_getextraspace(lua_.lua_state()), &remaining_ptr, sizeof(remaining_ptr));
 
     lua_["dofile"] = sol::lua_nil;
     lua_["loadfile"] = sol::lua_nil;
@@ -218,7 +263,7 @@ void ScriptEngine::install_client_api() {
                 for (size_t i = 0; i < captures.size(); ++i) {
                     caps[i] = captures[i];
                 }
-                InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_);
+                InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_, instruction_budget_remaining_);
                 sol::protected_function_result result = fn(caps);
                 if (!result.valid()) {
                     sol::error err = result;
@@ -260,7 +305,7 @@ void ScriptEngine::install_client_api() {
             for (size_t i = 0; i < captures.size(); ++i) {
                 caps[i] = captures[i];
             }
-            InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_);
+            InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_, instruction_budget_remaining_);
             sol::protected_function_result result = fn(caps);
             if (!result.valid()) {
                 sol::error err = result;
@@ -386,7 +431,7 @@ void ScriptEngine::call_event_handlers(const std::string& event_name, sol::objec
     // (same reentrancy hazard as TriggerManager::process_line).
     std::vector<sol::protected_function> handlers = it->second;
     for (auto& fn : handlers) {
-        InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_);
+        InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_, instruction_budget_remaining_);
         sol::protected_function_result result = fn(arg1, arg2);
         if (!result.valid()) {
             sol::error err = result;
@@ -455,7 +500,7 @@ void ScriptEngine::render_line(const StyledLine& line) {
 }
 
 void ScriptEngine::load_file(const std::string& path) {
-    InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_ * 100);
+    InstructionBudgetGuard guard(lua_.lua_state(), static_cast<long>(instruction_budget_) * 100, instruction_budget_remaining_);
     sol::protected_function_result result = lua_.safe_script_file(path, sol::script_pass_on_error);
     if (!result.valid()) {
         sol::error err = result;
@@ -464,7 +509,7 @@ void ScriptEngine::load_file(const std::string& path) {
 }
 
 void ScriptEngine::run_string(const std::string& code) {
-    InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_);
+    InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_, instruction_budget_remaining_);
     sol::protected_function_result result = lua_.safe_script(code, sol::script_pass_on_error);
     if (!result.valid()) {
         sol::error err = result;
@@ -549,7 +594,7 @@ void ScriptEngine::dispatch_timer(uint64_t id) {
         timer_callbacks_.erase(it); // erase first: safe if the callback registers a new timer of its own
     }
     {
-        InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_);
+        InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_, instruction_budget_remaining_);
         sol::protected_function_result result = fn();
         if (!result.valid()) {
             sol::error err = result;

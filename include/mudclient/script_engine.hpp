@@ -100,6 +100,19 @@ private:
     bool exit_requested_ = false;
     int exit_code_ = 0;
     int instruction_budget_ = 10'000'000;
+    // Shared, cumulative instruction counter for the current top-level
+    // callback's InstructionBudgetGuard scope. A pointer to this member is
+    // written into the main Lua thread's extra space once, at sandbox
+    // install time; Lua copies that same pointer into every coroutine's
+    // own extra space at creation (lua_newthread), so every coroutine's
+    // instruction-count hook -- which Lua also auto-installs on new
+    // threads, but with its own independently-reset per-thread countdown --
+    // decrements this one shared total instead of a separate budget per
+    // coroutine. See InstructionBudgetGuard in script_engine.cpp for why
+    // this is necessary (a real amplification bug the M3 Critic found:
+    // repeated fresh coroutine.create() calls each got their own full
+    // budget).
+    long instruction_budget_remaining_ = 0;
 };
 
 } // namespace mudclient

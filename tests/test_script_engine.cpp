@@ -234,3 +234,68 @@ TEST_CASE("ScriptEngine: sleep suspends and resumes a test coroutine via a timer
     REQUIRE(f.echoed.size() == 1);
     CHECK(f.echoed[0] == "resumed");
 }
+
+// Regression coverage for the client.register_timer/pause_timer/
+// resume_timer/reset_timer/kill_timer Lua bindings themselves (as opposed
+// to TimerManager's own, already-thorough unit tests): a Critic finding
+// (M3-NEW-2) pointed out these had no coverage at the Lua-binding layer at
+// all, including client.reset_timer(), added the same round to close
+// M3-F4 (#timer reset was previously unwired).
+TEST_CASE("ScriptEngine: register_timer/pause_timer/resume_timer/reset_timer/kill_timer bindings all work",
+          "[script]") {
+    Fixture f;
+
+    auto pump_for = [&](std::chrono::milliseconds duration) {
+        auto deadline = std::chrono::steady_clock::now() + duration;
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto ev = f.events.pop_wait(5ms);
+            if (ev && std::holds_alternative<TimerFired>(*ev)) {
+                f.engine.dispatch_timer(std::get<TimerFired>(*ev).id);
+            }
+        }
+    };
+    auto report_ticks = [&] {
+        f.echoed.clear();
+        f.engine.run_string("client.echo(tostring(ticks))");
+        REQUIRE(f.echoed.size() == 1);
+        return std::stoi(f.echoed[0]);
+    };
+
+    f.engine.run_string(R"lua(
+        ticks = 0
+        client.register_timer(0.01, function() ticks = ticks + 1 end, true, "tick")
+    )lua");
+
+    pump_for(60ms);
+    int ticks_before_pause = report_ticks();
+    CHECK(ticks_before_pause > 0);
+
+    f.engine.run_string("client.pause_timer('tick')");
+    pump_for(60ms);
+    int ticks_while_paused = report_ticks();
+    CHECK(ticks_while_paused == ticks_before_pause); // no ticks while paused
+
+    f.engine.run_string("client.resume_timer('tick')");
+    pump_for(60ms);
+    int ticks_after_resume = report_ticks();
+    CHECK(ticks_after_resume > ticks_while_paused); // ticking again
+
+    // reset_timer restarts the interval rather than stopping it -- the
+    // binding working correctly means ticks keep incrementing afterward
+    // (mirroring TimerManager's own "reset restarts the full interval"
+    // unit test, but exercised through the Lua binding this time).
+    f.engine.run_string("client.reset_timer('tick')");
+    pump_for(60ms);
+    int ticks_after_reset = report_ticks();
+    CHECK(ticks_after_reset > ticks_after_resume);
+
+    f.engine.run_string("client.kill_timer('tick')");
+    pump_for(60ms);
+    int ticks_after_kill = report_ticks();
+    // Same inherent asio cancel-vs-already-dispatched race documented for
+    // TimerManager::kill() directly (tests/test_timer_manager.cpp): at
+    // most one stray tick, never a cascade.
+    CHECK(ticks_after_kill <= ticks_after_reset + 1);
+    pump_for(60ms);
+    CHECK(report_ticks() == ticks_after_kill); // definitely silent now
+}

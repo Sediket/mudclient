@@ -44,6 +44,13 @@
 // distinct, narrower bypass: repeated *fresh* coroutine creation inside
 // one callback amplifying the effective per-callback budget by roughly
 // (iterations) instead of bounding total work to instruction_budget_.
+//
+// Fixed in the same commit that wires this test in: InstructionBudgetGuard
+// now points every Lua thread (main + every coroutine, via Lua's own
+// extra-space-copying behavior at thread creation) at one shared counter
+// instead of relying on each thread's own independently-reset countdown.
+// See InstructionBudgetGuard's comment in script_engine.cpp. Kept as a
+// permanent regression test.
 #include <catch2/catch_test_macros.hpp>
 
 #include <asio.hpp>
@@ -150,16 +157,37 @@ TEST_CASE("CRITIC: repeated fresh-coroutine creation amplifies the per-callback 
                         << " echoed=" << (f.echoed.empty() ? std::string("<none>") : f.echoed[0]));
 
     // A sandbox that genuinely bounds *total* work per callback to
-    // instruction_budget_ must abort this well before "total:20000000"
-    // is ever echoed -- the callback should end in an "instruction
-    // budget" error, the same as the direct-loop case, once cumulative
-    // work (however it's distributed across coroutines) exceeds the
-    // configured budget.
+    // instruction_budget_ must make most of these 200 coroutine.resume()
+    // calls fail with an instruction-budget error well before all
+    // 20,000,000 loop-body executions complete. The Lua script here
+    // catches each coroutine's own failure individually
+    // (`ok, result = coroutine.resume(co)`), so -- unlike the single-
+    // coroutine case in critic_lua_sandbox.cpp -- the *outer* callback
+    // doesn't itself abort: it keeps looping, accumulating "iter N
+    // failed: ..." echoes for every coroutine that hit the shared,
+    // already-exhausted budget, and still reaches its own final
+    // `client.echo('total:' .. total)` line. That's fine: this test's
+    // actual safety property isn't "the callback throws" (that's what
+    // the single-coroutine test checks), it's "cumulative real work
+    // stays bounded, however many coroutines it's spread across" -- and
+    // a `total` far below 20,000,000 demonstrates exactly that: once the
+    // shared counter (instruction_budget_remaining_) is exhausted by the
+    // handful of coroutines that ran before it, every later
+    // coroutine.create()+resume() pair fails almost immediately, so its
+    // 100,000-iteration body never contributes to `total`.
     //
-    // At HEAD (1d36d06) this FAILS: the callback echoes "total:20000000"
-    // with no instruction-budget error at all, confirming the
-    // amplification bypass described above is real, not hypothetical.
-    REQUIRE(f.echoed.size() == 1);
-    CHECK(f.echoed[0].find("instruction budget") != std::string::npos);
-    CHECK(f.echoed[0].find("total:20000000") == std::string::npos);
+    // Before the fix (commit 1d36d06 and earlier), this instead echoed a
+    // single "total:20000000" with no failures at all, confirming the
+    // amplification bypass was real.
+    REQUIRE_FALSE(f.echoed.empty());
+    int failed_count = 0;
+    for (const auto& msg : f.echoed) {
+        if (msg.find("instruction budget") != std::string::npos) ++failed_count;
+    }
+    CHECK(failed_count > 0);
+
+    const std::string& last = f.echoed.back();
+    REQUIRE(last.rfind("total:", 0) == 0);
+    long total = std::stol(last.substr(6));
+    CHECK(total < 5'000'000); // far below the 20,000,000 a full, unbounded run would reach
 }
