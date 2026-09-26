@@ -246,6 +246,64 @@ tested, and not going to change shape once the fixture itself is redone.
   replay test — has been extensively validated. `command_parser` itself is
   unit-tested standalone for shape/parsing correctness independent of this.
 
-## Response to prior Critic findings
+## Response to prior Critic findings (M3 round 1 → this round)
 
-This is M3 round 1 — there is no prior M3 Critic verdict to respond to.
+M3 round 1 (`reviews/m3-round1.json`) returned REQUEST_CHANGES with 1
+blocking finding and 3 non-blocking findings.
+
+- **M3-F1 (blocking, synthetic live-test fixture): escalated, not fixed.**
+  This is a genuine environmental blocker (no outbound access to
+  `zombiemud.org:3000`), independently reproduced by the Critic from its
+  own environment, not something fixable from inside this container. Per
+  `docs/agents/PROTOCOL.md`'s escalation clause ("an action needs...
+  network access not already granted"), see `ESCALATION.md` for the full
+  record, what was tried, and what happens once access is granted. I
+  agree with the Critic's call not to approve with this outstanding —
+  I'd flagged it myself as unresolved in round 1's HANDOFF.md.
+- **M3-F2 (major, security, unescaped tag version in `release.yml`
+  `run:`): fixed.** The version string now goes through `env:` +
+  `shell: bash` (bash rather than the platform-default shell so the fix
+  is identical across the Linux and Windows Configure steps) and is read
+  back as `"$MUDCLIENT_VERSION"`, never spliced into the `${{ }}`-templated
+  command text.
+- **M3-F3 (minor, correctness, unescaped/unvalidated splices into
+  synthesized Lua for built-in commands): fixed.** Added `is_valid_number()`
+  and `lua_id_or_label()` in `main.cpp`; every id/label/duration argument
+  that reaches a synthesized `client.*` call is now either validated as a
+  numeral before being spliced bare (`TimerAdd`'s seconds, `AliasDel`/
+  `TriggerDel`'s id — with an echoed error instead of silent injection if
+  it isn't numeric) or resolved through `lua_id_or_label()` (numeral
+  spliced bare so it's read as a Lua number for `with_timer_id`'s
+  id-vs-label dispatch, otherwise `lua_quote()`-escaped as a label) for
+  `TimerPause`/`TimerResume`/`TimerReset`/`TimerKill`. This also fixes a
+  latent, previously-undiscovered bug: a bare numeric timer id typed at
+  the prompt (e.g. `#timer pause 3`) was always being looked up as a
+  *label* string "3" instead of id 3, silently failing whenever no timer
+  happened to have that literal label.
+- **M3-F4 (minor, spec-deviation, `#timer list`/`#timer reset` unwired):
+  `#timer reset` fixed, `#timer list` left as a known limitation.**
+  `TimerManager::reset()` already existed but had no Lua binding; added
+  `client.reset_timer(id_or_label)` (mirroring `pause_timer`/
+  `resume_timer`/`kill_timer`) and wired `#timer reset` to it.
+  `#timer list` still prints a placeholder — `TimerManager` has no
+  enumeration API (only by-id/by-label lookups), and adding one felt like
+  more surface than this specific finding's "minor, self-disclosed, no
+  test impact" severity warranted for this round; flagging again for the
+  Critic's judgment on whether that's an acceptable scope cut.
+- **The Critic's adversarial test (`tests/critic/critic_lua_sandbox.cpp`,
+  not listed as a numbered finding but written to test a real hypothesis
+  per CRITIC.md's mutation/adversarial-test requirement): wired into the
+  build** (it wasn't in `tests/CMakeLists.txt` yet) **and run — both cases
+  pass.** The hypothesis it tested (that the instruction-budget hook
+  might not reach a runaway loop hidden inside a nested
+  `coroutine.create()`/`coroutine.resume()`) is disproven at HEAD:
+  `lua_sethook` installed on `lua_.lua_state()` covers the whole shared
+  `global_State`, which every coroutine created off it also runs under, so
+  the nested loop is aborted just as fast as a direct one. Updated the
+  test's own comments (which had asserted the opposite, stale from before
+  the hypothesis was actually run) to describe the real, safe outcome;
+  kept as a permanent regression test.
+
+All fixes verified together: `ctest --preset release` 120/120 (was 118;
++2 from wiring in the Critic's sandbox test file), 0 warnings on
+`-Wall -Wextra -Wpedantic -Werror`.

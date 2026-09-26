@@ -296,6 +296,9 @@ void ScriptEngine::install_client_api() {
     client.set_function("resume_timer", [this](sol::object id_or_label) {
         with_timer_id(id_or_label, [this](uint64_t id) { asio::post(network_io_, [this, id] { timers_.resume(id); }); });
     });
+    client.set_function("reset_timer", [this](sol::object id_or_label) {
+        with_timer_id(id_or_label, [this](uint64_t id) { asio::post(network_io_, [this, id] { timers_.reset(id); }); });
+    });
 
     client.set_function("get_gmcp", [this](std::string path) -> sol::object {
         auto value = gmcp_.get(path);

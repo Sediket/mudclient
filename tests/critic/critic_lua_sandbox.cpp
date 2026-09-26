@@ -133,8 +133,9 @@ TEST_CASE("CRITIC: instruction budget does NOT stop a runaway loop hidden inside
     // *inside* the trigger callback -- the same callback-invocation
     // context (a sol::protected_function called by C++ from
     // TriggerManager's dispatch), just with the actual work delegated to
-    // a child Lua thread that InstructionBudgetGuard's lua_sethook call
-    // never touches.
+    // a child Lua thread, to test the hypothesis that
+    // InstructionBudgetGuard's lua_sethook call (installed on lua_.lua_state(),
+    // the main thread) might not reach a coroutine's own separate lua_State.
     f.engine.run_string(
         "client.register_trigger('go', function()"
         "  local co = coroutine.create(function()"
@@ -160,14 +161,16 @@ TEST_CASE("CRITIC: instruction budget does NOT stop a runaway loop hidden inside
     // like the previous test: aborted quickly, with an "instruction
     // budget" error, and the loop must NOT have run to completion.
     //
-    // This CHECK (not REQUIRE) is the actual finding: at HEAD, the loop
-    // inside the coroutine runs to completion (echoes
-    // "completed:300000000") and takes on the order of a second or more,
-    // because lua_sethook was only ever installed on the main Lua thread,
-    // not on the child coroutine's own lua_State. That is a real sandbox
-    // gap: SPEC.md's "aborts any single callback" is violated whenever
-    // the callback's own work happens inside a nested coroutine, which
-    // any Lua script (malicious or merely buggy) can trivially do.
+    // Hypothesis disproven at HEAD: `lua_sethook` (as used here, with no
+    // LUA_MASKLINE/CALL restriction on which "thread" argument it targets)
+    // installs the count hook on the whole shared global_State, which
+    // every coroutine created off `lua_.lua_state()` also runs under --
+    // there is no separate hook to install per-coroutine. The nested loop
+    // is aborted just as fast as the direct one (see the elapsed_ms in the
+    // INFO above), with a "coroutine error: ... instruction budget..."
+    // message from the failed `coroutine.resume`. Kept as a permanent
+    // regression test (verified this doesn't silently regress if the
+    // guard's installation point ever changes), not a live finding.
     REQUIRE(f.echoed.size() == 1);
     CHECK(f.echoed[0].find("instruction budget") != std::string::npos);
     CHECK(f.echoed[0].find("completed:300000000") == std::string::npos);

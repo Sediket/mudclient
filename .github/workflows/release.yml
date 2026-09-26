@@ -59,12 +59,12 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Configure
+        shell: bash
         env:
           CC: ${{ runner.os == 'Linux' && 'gcc-13' || '' }}
           CXX: ${{ runner.os == 'Linux' && 'g++-13' || '' }}
-        run: >-
-          cmake --preset release
-          -DMUDCLIENT_VERSION_OVERRIDE=${{ steps.version.outputs.version }}
+          MUDCLIENT_VERSION: ${{ steps.version.outputs.version }}
+        run: cmake --preset release -DMUDCLIENT_VERSION_OVERRIDE="$MUDCLIENT_VERSION"
 
       - name: Build
         run: cmake --build --preset release

@@ -103,6 +103,37 @@ std::string lua_quote(const std::string& text) {
     return out;
 }
 
+// True if `s` is safe to splice bare as a Lua numeral (used for ids and
+// durations from built-in commands): digits, at most one '.', optional
+// leading '-', nothing else. Rejecting anything else (rather than
+// splicing it unchecked) is what keeps a crafted argument like
+// "1);client.echo('x');(" from running as injected Lua instead of being
+// treated as a literal value.
+bool is_valid_number(const std::string& s) {
+    size_t i = 0;
+    if (i < s.size() && s[i] == '-') ++i;
+    bool seen_digit = false;
+    bool seen_dot = false;
+    for (; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '.' && !seen_dot) {
+            seen_dot = true;
+        } else if (c >= '0' && c <= '9') {
+            seen_digit = true;
+        } else {
+            return false;
+        }
+    }
+    return seen_digit;
+}
+
+// A numeric id/label argument may be either: splice a validated numeral
+// bare (so it's read as a Lua number, matching client.*_timer's
+// id-vs-label dispatch), or quote it as a string label otherwise.
+std::string lua_id_or_label(const std::string& text) {
+    return is_valid_number(text) ? text : lua_quote(text);
+}
+
 std::string join(const std::vector<std::string>& parts, size_t from) {
     std::string out;
     for (size_t i = from; i < parts.size(); ++i) {
@@ -139,6 +170,10 @@ void handle_builtin(const ParsedCommand& cmd, ScriptEngine& engine, NetworkClien
                            ", { exact = true })");
         break;
     case BuiltinCommand::AliasDel:
+        if (!is_valid_number(cmd.args[0])) {
+            engine.run_string("client.echo(" + lua_quote("expected a numeric alias id, got: " + cmd.args[0]) + ")");
+            break;
+        }
         engine.run_string("client.remove_alias(" + cmd.args[0] + ")");
         break;
     case BuiltinCommand::AliasList:
@@ -149,12 +184,21 @@ void handle_builtin(const ParsedCommand& cmd, ScriptEngine& engine, NetworkClien
                            lua_quote(cmd.args[1]) + ") end)");
         break;
     case BuiltinCommand::TriggerDel:
+        if (!is_valid_number(cmd.args[0])) {
+            engine.run_string("client.echo(" + lua_quote("expected a numeric trigger id, got: " + cmd.args[0]) + ")");
+            break;
+        }
         engine.run_string("client.remove_trigger(" + cmd.args[0] + ")");
         break;
     case BuiltinCommand::TriggerList:
         std::printf("%zu trigger(s) registered\n", engine.triggers().count());
         break;
     case BuiltinCommand::TimerAdd: {
+        if (!is_valid_number(cmd.args[0])) {
+            engine.run_string("client.echo(" + lua_quote("expected a numeric interval in seconds, got: " + cmd.args[0]) +
+                               ")");
+            break;
+        }
         bool repeating = cmd.args.size() >= 2 && cmd.args[1] == "repeat";
         std::string command_text = join(cmd.args, repeating ? 2 : 1);
         engine.run_string("client.register_timer(" + cmd.args[0] + ", function() client.send(" +
@@ -165,16 +209,16 @@ void handle_builtin(const ParsedCommand& cmd, ScriptEngine& engine, NetworkClien
         std::printf("(use client.on/register_timer return values to track individual timers)\n");
         break;
     case BuiltinCommand::TimerPause:
-        engine.run_string("client.pause_timer(" + lua_quote(cmd.args[0]) + ")");
+        engine.run_string("client.pause_timer(" + lua_id_or_label(cmd.args[0]) + ")");
         break;
     case BuiltinCommand::TimerResume:
-        engine.run_string("client.resume_timer(" + lua_quote(cmd.args[0]) + ")");
+        engine.run_string("client.resume_timer(" + lua_id_or_label(cmd.args[0]) + ")");
         break;
     case BuiltinCommand::TimerReset:
-        std::printf("#timer reset is not yet wired to a client.* primitive; use #timer kill and #timer add\n");
+        engine.run_string("client.reset_timer(" + lua_id_or_label(cmd.args[0]) + ")");
         break;
     case BuiltinCommand::TimerKill:
-        engine.run_string("client.kill_timer(" + lua_quote(cmd.args[0]) + ")");
+        engine.run_string("client.kill_timer(" + lua_id_or_label(cmd.args[0]) + ")");
         break;
     }
 }
