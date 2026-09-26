@@ -1,20 +1,340 @@
+#include <atomic>
+#include <chrono>
 #include <cstdio>
-#include <string_view>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <future>
+#include <iostream>
+#include <string>
+#include <thread>
 
+#include <asio.hpp>
+
+#include "mudclient/command_parser.hpp"
+#include "mudclient/event_queue.hpp"
+#include "mudclient/lua_escaping.hpp"
+#include "mudclient/network_client.hpp"
+#include "mudclient/script_engine.hpp"
+#include "mudclient/session_recorder.hpp"
+#include "mudclient/timer_manager.hpp"
 #include "platform/console.hpp"
 
 #ifndef MUDCLIENT_VERSION
 #error "MUDCLIENT_VERSION must be defined by the build system"
 #endif
 
-int main(int argc, char** argv) {
-    mudclient::platform::init_console();
+using namespace mudclient;
+using namespace std::chrono_literals;
+
+namespace {
+
+struct Options {
+    bool show_version = false;
+    bool test_mode = false;
+    std::string test_script;
+    double timeout_seconds = 120.0;
+    std::string record_path;
+    std::string log_transcript_path;
+    std::string host;
+    std::string port;
+};
+
+// std::getenv is perfectly safe for a read-only lookup like this (nothing
+// here writes into or holds the returned pointer across another getenv/
+// setenv call); MSVC's C4996 for it is about the wider "unsafe CRT
+// function" family and has no narrower opt-out than this pragma.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+const char* get_env(const char* name) { return std::getenv(name); }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+Options parse_args(int argc, char** argv) {
+    Options opts;
+    std::vector<std::string> positional;
     for (int i = 1; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--version") {
-            std::printf("mudclient %s\n", MUDCLIENT_VERSION);
-            return 0;
+        std::string arg = argv[i];
+        if (arg == "--version") {
+            opts.show_version = true;
+        } else if (arg == "--test" && i + 1 < argc) {
+            opts.test_script = argv[++i];
+            opts.test_mode = true;
+        } else if (arg == "--timeout" && i + 1 < argc) {
+            opts.timeout_seconds = std::atof(argv[++i]);
+        } else if (arg == "--record" && i + 1 < argc) {
+            opts.record_path = argv[++i];
+        } else if (arg == "--log-transcript" && i + 1 < argc) {
+            opts.log_transcript_path = argv[++i];
+        } else if (!arg.empty() && arg[0] != '-') {
+            positional.push_back(arg);
         }
     }
-    std::printf("mudclient %s\nusage: mudclient --version\n", MUDCLIENT_VERSION);
-    return 0;
+    if (!positional.empty()) opts.host = positional[0];
+    if (positional.size() > 1) opts.port = positional[1];
+
+    // Test mode allows overriding host/port via environment, per spec.
+    if (opts.test_mode) {
+        if (const char* env_host = get_env("MUD_HOST")) opts.host = env_host;
+        if (const char* env_port = get_env("MUD_PORT")) opts.port = env_port;
+    }
+    return opts;
+}
+
+std::string join(const std::vector<std::string>& parts, size_t from) {
+    std::string out;
+    for (size_t i = from; i < parts.size(); ++i) {
+        if (i > from) out += ' ';
+        out += parts[i];
+    }
+    return out;
+}
+
+// Handles a parsed built-in ("#...") command. Everything here is
+// deliberately implemented by synthesizing a small snippet of Lua and
+// running it through the same client.* API a script would use, rather
+// than adding a parallel C++ dispatch path for each command -- this
+// reuses already-tested registration/sandboxing logic directly.
+void handle_builtin(const ParsedCommand& cmd, ScriptEngine& engine, NetworkClient& network, asio::io_context& network_io,
+                     bool& quit_requested) {
+    switch (cmd.command) {
+    case BuiltinCommand::Connect:
+        asio::post(network_io, [&network, host = cmd.args[0], port = cmd.args[1]] {
+            network.connect(host, port, 5000ms);
+        });
+        break;
+    case BuiltinCommand::Disconnect:
+        asio::post(network_io, [&network] { network.disconnect(); });
+        break;
+    case BuiltinCommand::Lua:
+        engine.run_string(cmd.raw_args);
+        break;
+    case BuiltinCommand::Quit:
+        quit_requested = true;
+        break;
+    case BuiltinCommand::AliasAdd:
+        engine.run_string("client.register_alias(" + lua_quote(cmd.args[0]) + ", " + lua_quote(cmd.args[1]) +
+                           ", { exact = true })");
+        break;
+    case BuiltinCommand::AliasDel:
+        if (!is_valid_number(cmd.args[0])) {
+            engine.run_string("client.echo(" + lua_quote("expected a numeric alias id, got: " + cmd.args[0]) + ")");
+            break;
+        }
+        engine.run_string("client.remove_alias(" + cmd.args[0] + ")");
+        break;
+    case BuiltinCommand::AliasList:
+        std::printf("%zu alias(es) registered\n", engine.aliases().count());
+        break;
+    case BuiltinCommand::TriggerAdd:
+        engine.run_string("client.register_trigger(" + lua_quote(cmd.args[0]) + ", function() client.send(" +
+                           lua_quote(cmd.args[1]) + ") end)");
+        break;
+    case BuiltinCommand::TriggerDel:
+        if (!is_valid_number(cmd.args[0])) {
+            engine.run_string("client.echo(" + lua_quote("expected a numeric trigger id, got: " + cmd.args[0]) + ")");
+            break;
+        }
+        engine.run_string("client.remove_trigger(" + cmd.args[0] + ")");
+        break;
+    case BuiltinCommand::TriggerList:
+        std::printf("%zu trigger(s) registered\n", engine.triggers().count());
+        break;
+    case BuiltinCommand::TimerAdd: {
+        if (!is_valid_number(cmd.args[0])) {
+            engine.run_string("client.echo(" + lua_quote("expected a numeric interval in seconds, got: " + cmd.args[0]) +
+                               ")");
+            break;
+        }
+        bool repeating = cmd.args.size() >= 2 && cmd.args[1] == "repeat";
+        std::string command_text = join(cmd.args, repeating ? 2 : 1);
+        engine.run_string("client.register_timer(" + cmd.args[0] + ", function() client.send(" +
+                           lua_quote(command_text) + ") end, " + (repeating ? "true" : "false") + ")");
+        break;
+    }
+    case BuiltinCommand::TimerList:
+        std::printf("(use client.on/register_timer return values to track individual timers)\n");
+        break;
+    case BuiltinCommand::TimerPause:
+        engine.run_string("client.pause_timer(" + lua_id_or_label(cmd.args[0]) + ")");
+        break;
+    case BuiltinCommand::TimerResume:
+        engine.run_string("client.resume_timer(" + lua_id_or_label(cmd.args[0]) + ")");
+        break;
+    case BuiltinCommand::TimerReset:
+        engine.run_string("client.reset_timer(" + lua_id_or_label(cmd.args[0]) + ")");
+        break;
+    case BuiltinCommand::TimerKill:
+        engine.run_string("client.kill_timer(" + lua_id_or_label(cmd.args[0]) + ")");
+        break;
+    }
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    platform::init_console();
+    Options opts = parse_args(argc, argv);
+
+    if (opts.show_version) {
+        std::printf("mudclient %s\n", MUDCLIENT_VERSION);
+        return 0;
+    }
+
+    // ---- Network thread: owns io_context, NetworkClient, TimerManager ----
+    asio::io_context network_io;
+    auto network_work_guard = asio::make_work_guard(network_io);
+    EventQueue events;
+    auto network = std::make_shared<NetworkClient>(network_io, events);
+    TimerManager timers(network_io, events);
+
+    std::unique_ptr<SessionRecorder> recorder;
+    if (!opts.record_path.empty()) {
+        recorder = std::make_unique<SessionRecorder>(opts.record_path);
+        SessionRecorder* recorder_ptr = recorder.get();
+        network->set_recorder([recorder_ptr](bool inbound, std::span<const uint8_t> data) {
+            if (inbound) {
+                recorder_ptr->record_inbound(data);
+            } else {
+                recorder_ptr->record_outbound_line(
+                    std::string_view(reinterpret_cast<const char*>(data.data()), data.size()));
+            }
+        });
+    }
+
+    std::thread network_thread([&network_io] { network_io.run(); });
+
+    // ---- Engine thread (this thread): owns the sol::state and every Lua binding ----
+    std::ofstream transcript;
+    if (!opts.log_transcript_path.empty()) {
+        transcript.open(opts.log_transcript_path, std::ios::trunc);
+    }
+
+    ScriptEngine engine(*network, network_io, timers, [&transcript](std::string text) {
+        std::fputs(text.c_str(), stdout);
+        std::fputc('\n', stdout);
+        std::fflush(stdout);
+        if (transcript.is_open()) {
+            transcript << text << '\n';
+            transcript.flush();
+        }
+    });
+    if (transcript.is_open()) {
+        engine.set_transcript_sink([&transcript](const std::string& line) {
+            transcript << line << '\n';
+            transcript.flush();
+        });
+    }
+
+    CommandParser command_parser;
+    bool quit_requested = false;
+
+    if (opts.test_mode) {
+        engine.load_file(opts.test_script);
+    } else {
+        std::ifstream init_check("scripts/init.lua");
+        if (init_check.good()) {
+            engine.load_file("scripts/init.lua");
+        }
+    }
+
+    if (!opts.host.empty()) {
+        std::string port = opts.port.empty() ? "23" : opts.port;
+        asio::post(network_io, [&network, host = opts.host, port] { network->connect(host, port, 5000ms); });
+    }
+
+    // ---- Stdin thread: only in interactive mode, per spec ----
+    std::thread stdin_thread;
+    std::atomic<bool> stdin_stop{false};
+    if (!opts.test_mode) {
+        stdin_thread = std::thread([&events, &stdin_stop] {
+            std::string line;
+            while (!stdin_stop && std::getline(std::cin, line)) {
+                events.push(UserInput{line});
+            }
+        });
+    }
+
+    // ---- Engine loop: drains events, dispatches to ScriptEngine/built-ins ----
+    auto watchdog_deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(opts.timeout_seconds);
+    int exit_code = 0;
+    bool timed_out = false;
+
+    while (!quit_requested && !engine.exit_requested()) {
+        if (opts.test_mode && std::chrono::steady_clock::now() >= watchdog_deadline) {
+            std::fprintf(stderr, "mudclient: --test watchdog expired after %.1fs (pending step unknown; script never called client.exit)\n",
+                         opts.timeout_seconds);
+            timed_out = true;
+            break;
+        }
+        auto event = events.pop_wait(200ms);
+        if (!event) {
+            continue;
+        }
+        std::visit(
+            [&](auto&& value) {
+                using T = std::decay_t<decltype(value)>;
+                if constexpr (std::is_same_v<T, Connected>) {
+                    engine.dispatch_connect();
+                } else if constexpr (std::is_same_v<T, Disconnected>) {
+                    engine.dispatch_disconnect(value.reason);
+                } else if constexpr (std::is_same_v<T, LineReceived>) {
+                    engine.dispatch_line(value.line);
+                } else if constexpr (std::is_same_v<T, GmcpReceived>) {
+                    engine.dispatch_gmcp(value.package, value.json);
+                } else if constexpr (std::is_same_v<T, UserInput>) {
+                    if (command_parser.is_command_line(value.text)) {
+                        auto parsed = command_parser.parse(value.text);
+                        if (std::holds_alternative<ParsedCommand>(parsed)) {
+                            handle_builtin(std::get<ParsedCommand>(parsed), engine, *network, network_io,
+                                           quit_requested);
+                        } else {
+                            std::printf("%s\n", std::get<ParseError>(parsed).message.c_str());
+                        }
+                    } else {
+                        engine.dispatch_input(value.text);
+                    }
+                } else if constexpr (std::is_same_v<T, TimerFired>) {
+                    engine.dispatch_timer(value.id);
+                }
+            },
+            *event);
+    }
+
+    if (engine.exit_requested()) {
+        exit_code = engine.exit_code();
+    } else if (timed_out) {
+        exit_code = 2;
+    }
+
+    // ---- Shutdown ----
+    stdin_stop = true;
+    // Resetting the work guard alone doesn't make io_context::run() return:
+    // a still-armed repeating timer (e.g. a script's own client.register_timer)
+    // is itself outstanding async work regardless of the guard, so run()
+    // would block on network_thread.join() until that timer's next deadline.
+    // Stopping the io_context explicitly abandons any such pending
+    // operations without invoking them, which is fine here since the
+    // process is exiting; disconnect() itself is fully synchronous, so
+    // running it before stop() in the same posted task still gets a clean
+    // socket shutdown first.
+    asio::post(network_io, [&network, &network_io] {
+        network->disconnect();
+        network_io.stop();
+    });
+    if (stdin_thread.joinable()) {
+        // The stdin thread is blocked in std::getline with no portable way
+        // to interrupt it; detach rather than join so process exit isn't
+        // held up waiting for a line of input that may never come. This
+        // only matters for interactive mode (never in --test mode, which
+        // has no stdin thread at all).
+        stdin_thread.detach();
+    }
+    network_work_guard.reset();
+    network_thread.join();
+
+    return exit_code;
 }

@@ -94,7 +94,15 @@ TEST_CASE("TimerManager: repeating timer fires multiple times, killed timer stop
     CHECK(fires >= 4); // ~130ms / 20ms, allow scheduling slack
 
     post_and_wait(io, [&] { timers->kill(id); });
-    CHECK(count_fires_within(events, 100ms) == 0);
+    // Same inherent race documented on the pause/resume generation test
+    // below: asio's cancel() cannot un-queue a completion that was already
+    // dispatched internally before kill()'s posted task got a turn on the
+    // io_context thread, so a single stray TimerFired can still arrive.
+    // kill() erases the timer entry outright (unlike pause, which only
+    // bumps a generation counter), so there's nothing left to reschedule
+    // from -- at most one stray tick, never a cascade. Observed as an
+    // occasional single leaked tick on a loaded Windows CI runner.
+    CHECK(count_fires_within(events, 100ms) <= 1);
 }
 
 TEST_CASE("TimerManager: pause suppresses ticks, resume continues", "[timer]") {

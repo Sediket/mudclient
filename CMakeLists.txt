@@ -74,6 +74,32 @@ if(ENABLE_TESTS)
     FetchContent_MakeAvailable(Catch2)
 endif()
 
+# Lua 5.4 has no official CMake build; fetched as a plain source tarball
+# and compiled ourselves as a static library, excluding the standalone
+# interpreter/compiler mains (lua.c/luac.c) we don't need. This satisfies
+# "built from source via FetchContent" and "do not use find_package for
+# Lua" without needing a third-party CMake-ified fork.
+FetchContent_Declare(lua54
+    URL https://www.lua.org/ftp/lua-5.4.7.tar.gz
+    URL_HASH SHA256=9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30
+    SYSTEM)
+FetchContent_MakeAvailable(lua54)
+file(GLOB LUA54_SOURCES "${lua54_SOURCE_DIR}/src/*.c")
+list(REMOVE_ITEM LUA54_SOURCES "${lua54_SOURCE_DIR}/src/lua.c" "${lua54_SOURCE_DIR}/src/luac.c")
+add_library(lua54 STATIC ${LUA54_SOURCES})
+target_include_directories(lua54 SYSTEM PUBLIC "${lua54_SOURCE_DIR}/src")
+if(UNIX)
+    target_compile_definitions(lua54 PRIVATE LUA_USE_LINUX)
+    target_link_libraries(lua54 PRIVATE m ${CMAKE_DL_LIBS})
+endif()
+
+FetchContent_Declare(sol2
+    GIT_REPOSITORY https://github.com/ThePhD/sol2.git
+    GIT_TAG v3.5.0
+    GIT_SHALLOW ON
+    SYSTEM)
+FetchContent_MakeAvailable(sol2)
+
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
@@ -104,10 +130,13 @@ add_library(mudclient_core STATIC
     src/timer_manager.cpp
     src/trigger_manager.cpp
     src/alias_manager.cpp
-    src/command_parser.cpp)
+    src/command_parser.cpp
+    src/gmcp_cache.cpp
+    src/script_engine.cpp
+    src/session_recorder.cpp)
 target_include_directories(mudclient_core PUBLIC include PRIVATE src)
 target_link_libraries(mudclient_core
-    PUBLIC asio_standalone nlohmann_json::nlohmann_json Threads::Threads pcre2-8-static
+    PUBLIC asio_standalone nlohmann_json::nlohmann_json Threads::Threads pcre2-8-static lua54 sol2
     PRIVATE mudclient_options)
 target_compile_options(mudclient_core PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 if(WIN32)
@@ -138,6 +167,7 @@ add_subdirectory(bench)
 if(ENABLE_TESTS)
     enable_testing()
     add_subdirectory(tests)
+    add_subdirectory(tests/fake_mud)
 endif()
 
 # ---- Install / packaging ----
