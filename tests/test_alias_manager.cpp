@@ -146,3 +146,30 @@ TEST_CASE("AliasManager: an action that adds/removes aliases mid-expansion does 
     REQUIRE(later.commands.size() == 1);
     CHECK(later.commands[0] == "late-cmd");
 }
+
+TEST_CASE("AliasManager: an action that forces the alias vector to reallocate mid-call is safe",
+          "[alias][concurrency]") {
+    // A single add doesn't necessarily reallocate aliases_ (small-vector
+    // headroom may already cover it), so this specifically registers
+    // enough new aliases from inside the callback to force a reallocation
+    // of the vector's backing storage while the callback (and the
+    // manager's own reference/pointer to its own entry) is still running.
+    // Without copying the Action out of the entry before invoking it,
+    // this reallocation frees the std::function object mid-call.
+    AliasManager aliases;
+    uint64_t self_id = 0;
+    self_id = aliases.add_alias(AliasManager::Kind::Exact, "mutate",
+                                 AliasManager::FunctionAction([&](const std::vector<std::string>&) {
+                                     aliases.remove_alias(self_id);
+                                     for (int i = 0; i < 500; ++i) {
+                                         aliases.add_alias(AliasManager::Kind::Exact, "late" + std::to_string(i),
+                                                            std::string("late-cmd"));
+                                     }
+                                     return std::string("first-cmd");
+                                 }));
+    auto result = aliases.expand("mutate");
+    REQUIRE(result.commands.size() == 1);
+    CHECK(result.commands[0] == "first-cmd");
+    CHECK_FALSE(aliases.exists(self_id));
+    CHECK(aliases.count() == 500);
+}

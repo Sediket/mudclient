@@ -71,6 +71,23 @@ struct LiteralFrame {
     bool has_alternation = false;
 };
 
+// Removes the last UTF-8 codepoint (1-4 bytes) from `s`, not just its last
+// byte. Patterns are compiled with PCRE2_UTF, so a "single character"
+// quantified with */?/{ (not guaranteed present) can be a multi-byte
+// sequence; popping only one byte would leave its leading byte(s)
+// misclassified as part of a "required" literal, which is exactly the
+// property extract_required_literal() must never get wrong.
+void pop_last_utf8_codepoint(std::string& s) {
+    if (s.empty()) {
+        return;
+    }
+    size_t i = s.size() - 1;
+    while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) {
+        --i; // continuation byte (10xxxxxx): keep walking back to the lead byte
+    }
+    s.resize(i);
+}
+
 } // namespace
 
 std::optional<std::string> extract_required_literal(std::string_view pattern, size_t min_length) {
@@ -179,7 +196,7 @@ std::optional<std::string> extract_required_literal(std::string_view pattern, si
         if (c == '*' || c == '+' || c == '?' || c == '{') {
             if (!current_run.empty()) {
                 if (c != '+') {
-                    current_run.pop_back(); // not guaranteed present
+                    pop_last_utf8_codepoint(current_run); // not guaranteed present
                 }
                 flush_run();
             }

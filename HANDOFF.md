@@ -172,8 +172,46 @@ on its own.
   `sol::protected_function` callbacks (which can themselves error, be
   slow, etc.) are plugged in as the `Action`/`FunctionAction` types.
 
-## Response to prior Critic findings
+## Response to prior Critic findings (M2 round 1 → this round)
 
-M1's two non-blocking findings were addressed before M1 merged (see
-`reviews/m1-round1.json` and the M1 NOTES.md entry); nothing carries
-forward as open for M2. This is M2's round 1.
+M2 round 1 (`reviews/m2-round1.json`) returned REQUEST_CHANGES with 3
+blocking findings and 1 non-blocking finding. All are addressed in the
+commit this HANDOFF now describes:
+
+- **M2-F1 (blocking, `extract_required_literal()` UTF-8 trimming): fixed.**
+  Added `pop_last_utf8_codepoint()` in `src/regex_pattern.cpp`, which walks
+  back over UTF-8 continuation bytes to find the real start of the last
+  codepoint before trimming it, instead of removing exactly one byte. New
+  regression test: `tests/test_regex_pattern.cpp`, "an optional multi-byte
+  UTF-8 codepoint is trimmed whole, not by one byte" (reproduces the
+  Critic's exact emoji example and asserts no byte of it survives into the
+  reported literal).
+- **M2-F2 (blocking, `AliasManager` reentrancy/UAF): fixed.**
+  `expand_recursive` now copies `Action action = a->action;` (and the
+  `fall_through` flag) out of the vector entry before invoking it, mirroring
+  `TriggerManager::process_line`'s existing pattern. The regression test
+  was strengthened to actually force a reallocation (500 aliases registered
+  from inside the callback, matching the Critic's own reproduction) rather
+  than the original single-add version that never exercised the bug.
+  Verified clean under ASan both ways: crashes (heap-use-after-free) with
+  the fix reverted, passes clean with it applied.
+- **M2-F3 (blocking, generation-counter mutation-testing gap): fixed.**
+  Added a new test that deliberately races `pause()` against a very short
+  repeating timer's own deadline (reintroducing the timing race the
+  previous test's fix had removed), but discriminates correct-vs-buggy
+  behavior by watching several multiples of the tick interval afterward
+  rather than asserting an exact tick count in a fixed short window: a
+  correct implementation produces at most one stray tick and then silence;
+  removing the generation check produces a continuous cascade at the
+  timer's own interval. Verified: passes stably under both `release` and
+  `asan` (3 repeated runs each), and fails clearly (leaked ticks ~4.5-9x
+  over threshold, checked both presets) with the mutation re-applied.
+- **M2-F4 (non-blocking, HANDOFF SHA lag): left as-is**, same rationale as
+  the already-adjudicated M1-F1 — historical record of the review
+  conversation, Critic verified the actual tip's CI independently, and the
+  only diff between the cited and actual commit was HANDOFF.md itself.
+
+All fixes verified together: `ctest --preset release` and `ctest --preset
+asan` both 102/102 (was 99; +3 new regression tests), 5x repeated locally
+for stability; `bench/trigger_bench` still ~53-60k lines/sec; Clang 18.1.3
+build also clean and all tests passing.

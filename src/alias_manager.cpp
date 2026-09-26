@@ -152,13 +152,19 @@ void AliasManager::expand_recursive(std::string command, int depth, ExpansionRes
         }
         matched_any = true;
 
-        std::string expansion;
-        if (std::holds_alternative<std::string>(a->action)) {
-            expansion = substitute_template(std::get<std::string>(a->action), captures);
-        } else {
-            expansion = std::get<FunctionAction>(a->action)(captures);
-        }
+        // Copy the action and the options we still need out of `a` before
+        // invoking it: a FunctionAction may itself add/remove aliases
+        // (including this one), which can reallocate aliases_ and leave
+        // `a` dangling for the remainder of this iteration.
+        Action action = a->action;
         bool fall_through = a->opts.fall_through;
+
+        std::string expansion;
+        if (std::holds_alternative<std::string>(action)) {
+            expansion = substitute_template(std::get<std::string>(action), captures);
+        } else {
+            expansion = std::get<FunctionAction>(action)(captures);
+        }
 
         for (auto& cmd : split_on_separator(expansion)) {
             expand_recursive(cmd, depth + 1, result);

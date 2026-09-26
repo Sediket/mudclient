@@ -122,6 +122,63 @@ TEST_CASE("TimerManager: pause suppresses ticks, resume continues", "[timer]") {
     post_and_wait(io, [&] { timers->kill(id); });
 }
 
+TEST_CASE("TimerManager: generation counter suppresses stale completions racing pause()",
+          "[timer][concurrency]") {
+    // Regression test for a mutation-testing gap: the previous
+    // pause/resume test paused immediately after registration (to remove
+    // a CI flake, see NOTES.md), which incidentally meant no test ever
+    // raced pause() against a timer's own about-to-fire deadline, so
+    // deleting the generation check in handle_fire passed the whole suite.
+    //
+    // asio's cancel() cannot un-queue a completion that's already been
+    // dispatched internally -- when that happens, the handler still runs
+    // with ec=success (not operation_aborted). Without the generation
+    // check, such a stale completion would push a TimerFired *and*
+    // reschedule itself via schedule(id), starting a runaway cascade of
+    // ticks from a timer the caller believes is paused. With the check,
+    // that single stale completion is recognized as belonging to a
+    // superseded generation and dropped without rescheduling.
+    //
+    // This deliberately races pause() against a very short repeating
+    // timer's deadline, then watches for a good while afterward (many
+    // multiples of the tick interval). A single legitimate stray
+    // completion (asio's documented cancel-vs-already-dispatched race)
+    // never repeats -- there's nothing left to reschedule it, since
+    // handle_fire's early return (correct behavior) or its buggy
+    // reschedule-anyway (mutant behavior) is a one-time fork in the road
+    // for that specific completion. So a correct implementation produces
+    // at most one tick per race and then silence, however slowly or
+    // quickly the test happens to run; a mutant with the generation check
+    // removed produces a *continuous* stream of ticks at the timer's
+    // normal interval for as long as we keep watching, because the
+    // rescheduled wait fires again, and again. Watching for many interval
+    // lengths (not just one) turns "0 or 1" vs. "keeps going" into a
+    // difference of orders of magnitude that holds regardless of
+    // execution speed (checked stable under both the `release` and `asan`
+    // presets, the latter being substantially slower per operation).
+    EventQueue events;
+    IoThread io;
+    auto timers = post_and_wait(io, [&] { return std::make_unique<TimerManager>(io.io, events); });
+
+    constexpr int trials = 20;
+    constexpr auto interval = 2ms;
+    int leaked = 0;
+    for (int t = 0; t < trials; ++t) {
+        uint64_t id = post_and_wait(io, [&] { return timers->add_timer(interval, true); });
+        std::this_thread::sleep_for(interval - 200us); // land close to the deadline
+        post_and_wait(io, [&] { timers->pause(id); });
+        leaked += count_fires_within(events, interval * 8); // watch for 8 intervals' worth of potential cascade
+        post_and_wait(io, [&] { timers->kill(id); });
+        while (events.pop_wait(0ms)) {
+        } // drain between trials
+    }
+    // Correct: at most one stray tick per race (bounded by `trials`).
+    // Mutant (generation check removed): a cascade of roughly (8 intervals
+    // / 1 interval) = ~8 ticks per race that actually lands, overshooting
+    // this bound by close to an order of magnitude.
+    CHECK(leaked <= trials);
+}
+
 TEST_CASE("TimerManager: reset restarts the full interval", "[timer]") {
     EventQueue events;
     IoThread io;

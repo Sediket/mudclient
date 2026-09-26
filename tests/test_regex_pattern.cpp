@@ -152,6 +152,29 @@ TEST_CASE("extract_required_literal: short runs below min_length are not reporte
     CHECK(*lit == "ab");
 }
 
+TEST_CASE("extract_required_literal: an optional multi-byte UTF-8 codepoint is trimmed whole, not by one byte",
+          "[prefilter]") {
+    // Regression test: a naive implementation popped exactly one *byte*
+    // before a trailing */?/{ quantifier, which for a multi-byte UTF-8
+    // character (patterns are compiled with PCRE2_UTF|PCRE2_UCP) left that
+    // character's leading byte(s) misclassified as part of a "required"
+    // literal even though the character itself is entirely optional. An
+    // optional emoji (4 bytes) followed by "xyz": if any byte of the
+    // emoji survives into the reported literal, a line with no emoji at
+    // all (which the regex still matches) would wrongly be prefiltered
+    // out, violating the "never skip a regex that would have matched"
+    // safety property this function documents.
+    std::string pattern = "\xF0\x9F\x98\x80?xyz"; // U+1F600 GRINNING FACE, optional
+    auto lit = extract_required_literal(pattern, 3);
+    REQUIRE(lit.has_value());
+    CHECK(*lit == "xyz");
+
+    CompiledRegex re(pattern);
+    std::vector<std::string> captures;
+    REQUIRE(re.match("xyz", captures)); // matches with no emoji present
+    CHECK(lit->find('\xF0') == std::string::npos); // no stray emoji byte leaked into the literal
+}
+
 TEST_CASE("extract_required_literal: dot and anchors break runs but surrounding text still counts", "[prefilter]") {
     auto lit = extract_required_literal("^longprefixtext.*longsuffixtext$");
     REQUIRE(lit.has_value());
