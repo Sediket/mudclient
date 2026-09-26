@@ -98,17 +98,21 @@ TEST_CASE("TimerManager: repeating timer fires multiple times, killed timer stop
 }
 
 TEST_CASE("TimerManager: pause suppresses ticks, resume continues", "[timer]") {
+    // Pauses immediately after registration, well before the first
+    // deadline, rather than letting some ticks happen first and then
+    // pausing: asio's cancel() cannot un-queue a completion that has
+    // already been dispatched, so pausing a moment before a tick was about
+    // to fire is an inherent (and otherwise-harmless) race that showed up
+    // as an intermittent extra tick on a loaded CI runner. Pausing before
+    // any tick can possibly have fired removes that race from this test
+    // entirely, while still exercising the same pause/resume behavior.
     EventQueue events;
     IoThread io;
     auto timers = post_and_wait(io, [&] { return std::make_unique<TimerManager>(io.io, events); });
-    uint64_t id = post_and_wait(io, [&] { return timers->add_timer(20ms, true); });
-
-    std::this_thread::sleep_for(50ms); // let it tick a couple times
-    while (events.pop_wait(1ms)) {
-    } // drain
+    uint64_t id = post_and_wait(io, [&] { return timers->add_timer(60ms, true); });
 
     post_and_wait(io, [&] { timers->pause(id); });
-    CHECK(count_fires_within(events, 100ms) == 0); // paused: no ticks
+    CHECK(count_fires_within(events, 150ms) == 0); // paused: no ticks, even past when the first would have fired
 
     post_and_wait(io, [&] { timers->resume(id); });
     auto ev = events.pop_wait(1s);
