@@ -105,3 +105,21 @@ already documented above. I'm not merging PR #3 without either a formal
 APPROVE or explicit direction from the user to proceed anyway, since the
 protocol's merge step is gated on APPROVE. Bringing this to the user now
 rather than spawning a 5th review round.
+
+**User's decision (this session):** keep waiting for network access rather
+than merging without a formal APPROVE. Also asked why access is blocked
+and for a way to capture a real session from elsewhere in the meantime.
+Added `scripts/capture_zombiemud_session.py` (stdlib-only Python, no
+dependencies) for exactly that: run it from any location with real
+network access to `zombiemud.org:3000`, and it connects once, drives a
+conservative login/move/quit sequence by watching for quiet gaps in the
+server's output (rather than pattern-matching text that isn't known in
+advance), and writes a JSONL recording in the exact format `--record`
+already produces (dropping in directly as `tests/replay/zombiemud_session.jsonl`)
+plus a plain transcript for reading and quoting into `NOTES.md`. Verified
+locally against a throwaway mock server before handing off. Once the user
+runs it and sends back both files, the remaining steps are: build the
+real `tests/live/zombiemud.lua` from the transcript's actual patterns
+(quoting the real lines, per `docs/SPEC.md` section 5), replace the
+synthetic fixture, confirm the replay test still passes, update
+`HANDOFF.md`, and spawn a fresh Critic round for just that change.
