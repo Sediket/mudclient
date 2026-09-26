@@ -2,8 +2,15 @@
 
 **Repository:** https://github.com/Sediket/mudclient
 **Branch:** `m2`
-**Commit SHA (review this one):** `28e98663ffd2ef3ff66af72499c8600ffc4641e0`
+**Commit SHA (review this one):** `3c72af273401f2ea68affb593ee033a30c9e476c`
 **PR:** https://github.com/Sediket/mudclient/pull/2
+
+This is M2 **round 2**, addressing round 1's 3 blocking findings. See
+"Response to prior Critic findings" near the end of this document and
+`reviews/m2-round1.json` for the full round-1 verdict. `3c72af2` is the
+current tip of `m2` and contains the actual code fixes; its own CI results
+are in the second results table below (the first table, further down, is
+the round-1 snapshot, left as historical record).
 
 ## What was built
 
@@ -88,11 +95,11 @@ to instrumentation, still measured ~2,300 lines/sec against a
 `--min-lines-per-sec 500` threshold — not part of the milestone's required
 exit commands, but run as an extra sanity check.)
 
-## CI: green on the exact commit under review
+## CI: round 1 (historical snapshot, superseded below)
 
 PR: https://github.com/Sediket/mudclient/pull/2 (branch `m2` → `main`)
 Workflow run: https://github.com/Sediket/mudclient/actions/runs/36210112067
-(triggered by `28e98663ffd2ef3ff66af72499c8600ffc4641e0`, the current tip of `m2`)
+(triggered by `28e98663ffd2ef3ff66af72499c8600ffc4641e0`)
 
 | Job | Conclusion | Job log URL |
 |---|---|---|
@@ -100,6 +107,24 @@ Workflow run: https://github.com/Sediket/mudclient/actions/runs/36210112067
 | `linux-clang17` | success (99/99 tests) | https://github.com/Sediket/mudclient/actions/runs/36210112067/job/108314678690 |
 | `windows-msvc` | success (99/99 tests) | https://github.com/Sediket/mudclient/actions/runs/36210112067/job/108314678578 |
 | `linux-asan` | success (99/99 tests, ASan+UBSan) | https://github.com/Sediket/mudclient/actions/runs/36210112067/job/108314678737 |
+
+## CI: round 2 — green on the exact commit under review
+
+Workflow run: https://github.com/Sediket/mudclient/actions/runs/36211964579
+(triggered by `3c72af273401f2ea68affb593ee033a30c9e476c`, the current tip of `m2` — **review this commit**)
+
+| Job | Conclusion | Job log URL |
+|---|---|---|
+| `linux-gcc13` | success (102/102 tests) | https://github.com/Sediket/mudclient/actions/runs/36211964579/job/108320201105 |
+| `linux-clang17` | success (102/102 tests) | https://github.com/Sediket/mudclient/actions/runs/36211964579/job/108320201115 |
+| `windows-msvc` | success (102/102 tests) | https://github.com/Sediket/mudclient/actions/runs/36211964579/job/108320200971 |
+| `linux-asan` | success (102/102 tests, ASan+UBSan) | https://github.com/Sediket/mudclient/actions/runs/36211964579/job/108320201218 |
+
+I fetched and read the tail of the `windows-msvc` job's raw log specifically
+(not just the green checkmark), since the two new timing/concurrency
+regression tests (the alias-reallocation test and the timer generation-race
+test) are exactly the kind of thing that could be flaky on that runner —
+confirmed `100% tests passed, 0 tests failed out of 102` there too.
 
 ## Bugs found and fixed during this milestone (all before this HANDOFF)
 
