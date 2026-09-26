@@ -39,6 +39,19 @@ struct Options {
     std::string port;
 };
 
+// std::getenv is perfectly safe for a read-only lookup like this (nothing
+// here writes into or holds the returned pointer across another getenv/
+// setenv call); MSVC's C4996 for it is about the wider "unsafe CRT
+// function" family and has no narrower opt-out than this pragma.
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+const char* get_env(const char* name) { return std::getenv(name); }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
 Options parse_args(int argc, char** argv) {
     Options opts;
     std::vector<std::string> positional;
@@ -64,8 +77,8 @@ Options parse_args(int argc, char** argv) {
 
     // Test mode allows overriding host/port via environment, per spec.
     if (opts.test_mode) {
-        if (const char* env_host = std::getenv("MUD_HOST")) opts.host = env_host;
-        if (const char* env_port = std::getenv("MUD_PORT")) opts.port = env_port;
+        if (const char* env_host = get_env("MUD_HOST")) opts.host = env_host;
+        if (const char* env_port = get_env("MUD_PORT")) opts.port = env_port;
     }
     return opts;
 }
