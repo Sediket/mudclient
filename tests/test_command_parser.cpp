@@ -14,7 +14,13 @@ TEST_CASE("tokenize_quoted: double and single quoted segments become one token",
 }
 
 TEST_CASE("tokenize_quoted: escaped characters inside quotes", "[command_parser]") {
-    CHECK(tokenize_quoted(R"("she said \"hi\"")") == std::vector<std::string>{R"(she said "hi")"});
+    // Written as ordinary (non-raw) string literals: MSVC's lexer rejects a
+    // raw string literal whose content contains a backslash immediately
+    // followed by a quote (R"(...\"...)"), even though it's valid standard
+    // C++ (GCC and Clang both accept it) -- portably avoided here rather
+    // than relied upon.
+    std::string input = "\"she said \\\"hi\\\"\"";
+    CHECK(tokenize_quoted(input) == std::vector<std::string>{"she said \"hi\""});
 }
 
 TEST_CASE("tokenize_quoted: adjacent quoted/unquoted pieces merge into one token", "[command_parser]") {
