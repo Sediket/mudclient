@@ -536,6 +536,7 @@ void ScriptEngine::run_string(const std::string& code) {
 // calls pump_resumes() once it's done, which runs client._pump_resumes()
 // as its own fresh top-level script -- exactly the call shape that works.
 void ScriptEngine::pump_resumes() {
+    InstructionBudgetGuard guard(lua_.lua_state(), instruction_budget_, instruction_budget_remaining_);
     sol::protected_function_result result = lua_.safe_script("client._pump_resumes()", sol::script_pass_on_error);
     if (!result.valid()) {
         sol::error err = result;

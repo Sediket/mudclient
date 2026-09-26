@@ -246,6 +246,30 @@ tested, and not going to change shape once the fixture itself is redone.
   replay test — has been extensively validated. `command_parser` itself is
   unit-tested standalone for shape/parsing correctness independent of this.
 
+## Response to M3 round 3 findings (`reviews/m3-round3.json`, REQUEST_CHANGES)
+
+Round 3 confirmed M3-NEW-1 (round 2's blocking finding) is genuinely fixed
+(independently verified via source reading, a fresh build, and a mutation
+test), M3-F1 stays escalated (unchanged), and found two new issues:
+
+- **M3-NEW-3 (blocking, test-integrity): fixed.** The round-2
+  `reset_timer` test coverage was inadequate — it only checked that ticks
+  kept increasing on an already-ticking repeating timer, which holds
+  whether or not `reset_timer` does anything at all (confirmed by the
+  Critic's own mutation: a no-op `reset_timer` binding still passed that
+  test). Wired in the Critic's own new adversarial test
+  (`tests/critic/critic_reset_timer_binding_coverage.cpp`, mirroring
+  `TimerManager`'s own decisive "reset restarts the full interval" test
+  but through the Lua binding), which does fail against a no-op binding
+  and passes against the real one.
+- **M3-NEW-4 (minor, security): fixed.** `ScriptEngine::pump_resumes()`
+  was the one Lua entry point with no `InstructionBudgetGuard` (every
+  other `dispatch_*`/`run_string` entry point has one). Added one,
+  matching every other entry point's pattern exactly.
+
+All fixes verified together: `ctest --preset release`/`asan` both
+128/128 (was 127; +1 from wiring in the Critic's new test).
+
 ## Response to M3 round 2 findings (`reviews/m3-round2.json`, ESCALATE)
 
 Round 2 upheld M3-F1 (escalated, unchanged — see `ESCALATION.md`), confirmed
