@@ -2,8 +2,14 @@
 
 **Repository:** https://github.com/Sediket/mudclient
 **Branch:** `m1`
-**Commit SHA:** `13d39a69eaad55a1a5c06b10ea9eefcbf9c5dd07`
+**Commit SHA (review this one):** `0b0c8847093df84f5904e14859a2d473c43e5f6d`
 **PR:** https://github.com/Sediket/mudclient/pull/1
+
+Note on SHAs below: `13d39a69eaad55a1a5c06b10ea9eefcbf9c5dd07` is the code
+commit (parser/network/events/CMake/CI). `0b0c8847093df84f5904e14859a2d473c43e5f6d`
+adds only this file on top of it — no code changed. CI ran and passed on
+*both* commits (see the table below, which lists the run for
+`0b0c8847093df84f5904e14859a2d473c43e5f6d`, the commit to review).
 
 ## What was built
 
@@ -94,8 +100,9 @@ M3 scope per the spec).
 ## CI: green on the exact commit under review
 
 PR: https://github.com/Sediket/mudclient/pull/1 (branch `m1` → `main`)
-Workflow run: https://github.com/Sediket/mudclient/actions/runs/36206869041
-(triggered by `13d39a69eaad55a1a5c06b10ea9eefcbf9c5dd07`, the current tip of `m1`)
+
+Workflow run for `13d39a69eaad55a1a5c06b10ea9eefcbf9c5dd07` (code commit):
+https://github.com/Sediket/mudclient/actions/runs/36206869041
 
 | Job | Conclusion | Job log URL |
 |---|---|---|
@@ -103,6 +110,17 @@ Workflow run: https://github.com/Sediket/mudclient/actions/runs/36206869041
 | `linux-clang17` | success (28/28 tests) | https://github.com/Sediket/mudclient/actions/runs/36206869041/job/108305141594 |
 | `windows-msvc` | success (28/28 tests) | https://github.com/Sediket/mudclient/actions/runs/36206869041/job/108305141476 |
 | `linux-asan` | success (28/28 tests, ASan+UBSan) | https://github.com/Sediket/mudclient/actions/runs/36206869041/job/108305141624 |
+
+Workflow run for `0b0c8847093df84f5904e14859a2d473c43e5f6d` (adds this file,
+no code change — **review this commit**):
+https://github.com/Sediket/mudclient/actions/runs/36207090660
+
+| Job | Conclusion | Job log URL |
+|---|---|---|
+| `linux-gcc13` | success (28/28 tests) | https://github.com/Sediket/mudclient/actions/runs/36207090660/job/108305780275 |
+| `linux-clang17` | success (28/28 tests) | https://github.com/Sediket/mudclient/actions/runs/36207090660/job/108305780205 |
+| `windows-msvc` | success (28/28 tests) | https://github.com/Sediket/mudclient/actions/runs/36207090660/job/108305780045 |
+| `linux-asan` | success (28/28 tests, ASan+UBSan) | https://github.com/Sediket/mudclient/actions/runs/36207090660/job/108305780283 |
 
 I fetched and read the tail of each job's raw log (not just the green
 checkmark) to confirm each one actually compiled from source and ran all 28
