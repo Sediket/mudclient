@@ -1,0 +1,59 @@
+{
+  "milestone": "M3",
+  "commit": "0032590aaabb2100ebada65274cb91842e8e89c2",
+  "verdict": "REQUEST_CHANGES",
+  "exit_commands": [
+    { "command": "cmake --preset release && cmake --build --preset release", "exit_code": 0 },
+    { "command": "ctest --preset release --output-on-failure", "exit_code": 0 },
+    { "command": "cmake --preset asan && cmake --build --preset asan && ctest --preset asan", "exit_code": 0 },
+    { "command": "./build/release/bench/trigger_bench --min-lines-per-sec 2000", "exit_code": 0 },
+    { "command": "replay_zombiemud (ctest, both presets)", "exit_code": 0 },
+    { "command": "one successful live run of tests/live/zombiemud.lua against zombiemud.org:3000", "exit_code": -1 }
+  ],
+  "findings": [
+    {
+      "id": "M3-F1",
+      "severity": "blocking",
+      "category": "spec-deviation",
+      "location": "tests/live/zombiemud.lua; tests/replay/zombiemud_session.jsonl; ESCALATION.md",
+      "description": "Unchanged since round 2, re-verified this round rather than assumed: tests/live/zombiemud.lua and tests/replay/zombiemud_session.jsonl are still built from a synthetic local mock server, not a real recorded session against zombiemud.org:3000, and no live run against the real server has ever succeeded. This remains a genuine environmental blocker, independently reconfirmed a third time (round 1 Builder, round 1/round 2 Critic, and now round 3 Critic, all from separate environment instances). SPEC.md's M3 exit criteria still require 'one successful live run'; this exit command has never been executed, let alone passed.",
+      "evidence": "This round: `timeout 8 bash -c 'echo > /dev/tcp/zombiemud.org/3000'` timed out (exit 124), reproduced from this round's own environment on 2026-09-26, independent of rounds 1 and 2's own reproductions. No commits touching tests/live/ or tests/replay/ appear in the round-2-to-round-3 diff (`git diff --stat 570c1a2 0032590` -- only script_engine.cpp/.hpp, main.cpp, lua_escaping.hpp, and test files changed), consistent with the Builder still awaiting network access rather than having silently worked around this.",
+      "spec_ref": "docs/SPEC.md section 5 (live-test real-recording requirement) and 'Milestones' (M3 exit: '... plus one successful live run')."
+    },
+    {
+      "id": "M3-NEW-3",
+      "severity": "blocking",
+      "category": "test-integrity",
+      "location": "tests/test_script_engine.cpp:288-295 (the reset_timer portion of \"ScriptEngine: register_timer/pause_timer/resume_timer/reset_timer/kill_timer bindings all work\")",
+      "description": "Round 2's M3-NEW-2 finding (no test coverage for the M3-F4 client.reset_timer binding) was marked 'fixed' by adding this ScriptEngine-level test, but the reset_timer portion of that test does not actually exercise reset_timer's effect. It calls client.reset_timer('tick') on a timer that is already a repeating 10ms-interval timer (already ticking from the immediately preceding resume_timer step in the same test), then only asserts `ticks_after_reset > ticks_after_resume` after a further 60ms pump. That assertion is true whether or not client.reset_timer does anything at all -- the timer keeps ticking on its own regardless of the reset call, since it is repeating and was never paused again. Confirmed by mutation: replacing the C++ reset_timer binding's body with a complete no-op (dropping the `asio::post(...timers_.reset(id)...)` call entirely, leaving with_timer_id/asio::post untouched for every other binding) leaves this entire test case passing (13/13 assertions, 0 failures) on a full local rebuild. Per CRITIC.md's own mutation-check mandate ('for at least three components per milestone... run the suite, and confirm a test fails. If none fails, that's a blocking test-coverage finding'), this is exactly that case for a fix that was specifically claimed to close a round-2 finding. The underlying reset_timer binding itself is correct by inspection (mirrors the already-tested pause_timer/resume_timer/kill_timer pattern exactly, and TimerManager::reset() is independently unit-tested at its own layer in test_timer_manager.cpp's 'TimerManager: reset restarts the full interval') -- this is specifically a test-integrity gap in the new regression test claimed to cover it, not a functional regression in the binding.",
+      "evidence": "Mutation performed in a throwaway clone at commit 0032590 (never pushed): `client.set_function(\"reset_timer\", [this](sol::object) { /* no-op */ });`, full rebuild (`cmake --build --preset release`), then `ctest`'s \"ScriptEngine: register_timer/pause_timer/resume_timer/reset_timer/kill_timer bindings all work\" test case: 13 assertions, 13 passed, 0 failed -- unchanged from the unmutated build. Added `tests/critic/critic_reset_timer_binding_coverage.cpp` (committed with this review, not yet wired into tests/CMakeLists.txt, following the round-1/round-2 precedent of the Critic adding the file and the Builder wiring it in next round), which mirrors TimerManager's own decisive 'reset restarts the full interval' unit test through the Lua binding instead: a one-shot 60ms timer, reset 40ms in, must not fire in the ~20ms window it would have fired without the reset, and must fire once the restarted 60ms interval elapses. Verified in the same throwaway clone: this new test passes against the real (correct) reset_timer binding, and fails (2 of 3 assertions) against the same no-op mutation that the existing test missed.",
+      "spec_ref": "docs/agents/CRITIC.md 'Adversarial tests' / 'Mutation check'."
+    },
+    {
+      "id": "M3-NEW-4",
+      "severity": "minor",
+      "category": "security",
+      "location": "src/script_engine.cpp:493-499 (ScriptEngine::pump_resumes)",
+      "description": "Every other ScriptEngine entry point that runs Lua (load_file, run_string, call_event_handlers, dispatch_timer's fn() call, and both register_alias's and register_trigger's action lambdas) constructs an InstructionBudgetGuard before invoking Lua. pump_resumes()'s own `lua_.safe_script(\"client._pump_resumes()\", ...)` call does not -- it is the one top-level Lua invocation in the file with no guard at all. This is not currently a full sandbox escape: every coroutine queued for resume already carries its own per-thread hookmask/hook/basehookcount (copied from its creating thread at coroutine.create() time, verified by reading Lua 5.4.7's lstate.c lua_newthread) and a pointer to the shared budget counter in its extra space (copied from g->mainthread, also verified in lua_newthread), so a resumed coroutine's own script code is still budget-limited regardless of whether the enclosing safe_script call is guarded. But client._pump_resumes()'s own bootstrap-Lua bookkeeping (the `while #client._pending_resumes > 0 do local item = table.remove(client._pending_resumes, 1) ... end` loop) runs with zero instruction-budget enforcement, and `table.remove(t, 1)` is an O(n) front-shift, making a full drain O(n^2) in the queue length. client._queue_resume is a plain global function (Lua has no real privacy for the `_`-prefix convention), so a script can grow client._pending_resumes arbitrarily large across many individually-budgeted callback invocations (e.g. registering a large number of concurrent client.wait_for waiters against the same pattern, or simply calling client._queue_resume directly in a loop) and then force an unguarded, unbounded-real-time drain the next time any dispatch_* method calls pump_resumes(). Recommend wrapping pump_resumes()'s safe_script call in an InstructionBudgetGuard like every other entry point, for consistency and defense-in-depth, even though no single trigger/timer callback can itself hit this path unguarded for its own directly-written code.",
+      "evidence": "Read src/script_engine.cpp's install_client_api/call_event_handlers/dispatch_timer/load_file/run_string (each constructs `InstructionBudgetGuard guard(...)` immediately before its Lua call) against pump_resumes (src/script_engine.cpp:493-499, no guard construction anywhere in the function). Read Lua 5.4.7's src/lstate.c:286-310 (lua_newthread) directly (downloaded from lua.org, matching the version FetchContent pulls) to confirm hookmask/hook/basehookcount are copied from the creating thread and extraspace is copied from g->mainthread at coroutine-creation time, which is what makes already-created coroutines safe to resume outside a guard scope, and confirmed client._queue_resume/client._pending_resumes are ordinary (non-hidden) Lua globals in the kBootstrapLua string in the same file.",
+      "spec_ref": "docs/agents/CRITIC.md 'Lua' guidance ('instruction hook actually firing; errors caught at every callback boundary')."
+    }
+  ],
+  "disputes_adjudicated": [
+    {
+      "finding_id": "M3-F1",
+      "upheld": true,
+      "reason": "Not disputed by the Builder (still escalated, ESCALATION.md unchanged); independently re-confirmed the same network block a third time this round from a fresh environment instance. No code under tests/live/ or tests/replay/ changed between round 2 and round 3. This remains a genuine environmental blocker outside the Builder's or this Critic's control, and stays open pending a human granting network access -- it is not itself a reason this round's verdict is REQUEST_CHANGES rather than ESCALATE (see the verdict note below); it is carried forward exactly as round 2 left it."
+    },
+    {
+      "finding_id": "M3-NEW-1",
+      "upheld": false,
+      "reason": "Resolved and independently re-verified end to end, not just re-read: (1) read Lua 5.4.7's actual lstate.c (lua_newthread, lines 286-310) and lstate.h from a fresh download matching the vendored FetchContent version, confirming hook/hookmask/hookcount/basehookcount are per-lua_State fields copied from the creating thread at coroutine-creation time (matching the Builder's fix comment) and that extraspace is in fact copied from g->mainthread specifically (not literally 'the creating thread' as the code comment states -- a harmless documentation imprecision, since g->mainthread's extraspace is what install_sandbox() writes the shared-counter pointer into exactly once and it never changes, so the practical effect is identical and, if anything, more robust against any hypothetical broken link in a creation chain); (2) built commit 0032590 fresh under both release and asan presets, 127/127 tests passing both; (3) mutation check: reverted script_engine.cpp/.hpp to their pre-fix (570c1a2) content in a throwaway clone, rebuilt, and confirmed tests/critic/critic_lua_coroutine_budget_amplification.cpp fails exactly as the round-2 finding predicted (echoes 'total:20000000' with zero instruction-budget errors, both CHECKs failing), then restored the fix and confirmed it passes again. The fix genuinely closes the amplification bypass."
+    },
+    {
+      "finding_id": "M3-NEW-2",
+      "upheld": true,
+      "reason": "Partially resolved, not fully as claimed. The lua_escaping.hpp extraction and its direct unit tests (tests/test_lua_escaping.cpp) are real and verified by mutation this round: breaking lua_quote's single-quote escaping (`if (c == '\\\\' || c == '\\'')` narrowed to `if (c == '\\\\')`) causes 3 of 24 assertions across 2 test cases to fail immediately, including the exact injection-shaped case the test targets. That half of M3-NEW-2 is closed. The other half -- the ScriptEngine-level ...bindings-all-work test meant to close the reset_timer coverage gap specifically -- does not actually test reset_timer's effect, as a mutation this round shows (see M3-NEW-3, new this round, for the full evidence and a Critic-supplied test that does catch it). Marking the finding itself upheld (not fully resolved) rather than closing it outright, with M3-NEW-3 carrying the specific, actionable remainder forward."
+    }
+  ]
+}
