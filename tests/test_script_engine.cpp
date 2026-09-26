@@ -273,7 +273,12 @@ TEST_CASE("ScriptEngine: register_timer/pause_timer/resume_timer/reset_timer/kil
     f.engine.run_string("client.pause_timer('tick')");
     pump_for(60ms);
     int ticks_while_paused = report_ticks();
-    CHECK(ticks_while_paused == ticks_before_pause); // no ticks while paused
+    // Same inherent asio cancel-vs-already-dispatched race documented for
+    // TimerManager's own pause/kill tests: at most one stray tick racing
+    // pause(), never a cascade (nothing reschedules a paused timer, so it
+    // can't repeat). Observed as an occasional single leaked tick on a
+    // loaded Windows CI runner.
+    CHECK(ticks_while_paused <= ticks_before_pause + 1);
 
     f.engine.run_string("client.resume_timer('tick')");
     pump_for(60ms);
