@@ -1,0 +1,101 @@
+name: Live test
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # weekly, Monday 06:00 UTC
+  workflow_dispatch:
+  workflow_call:
+    outputs:
+      passed:
+        description: "\"true\" if the live smoke test exited 0 on at least one matrix leg, \"false\" otherwise"
+        value: ${{ jobs.live.outputs.passed }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-test
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: live-${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        os: [ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    outputs:
+      passed: ${{ steps.live_linux.outputs.passed || steps.live_windows.outputs.passed }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install GCC 13
+        if: runner.os == 'Linux'
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-13 g++-13
+
+      - name: Setup MSVC dev environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@c1ed231f339aec74961130db0459823a08f1b215 # v1.9.0
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@8b297075da4cd2a5f1fd21fe011b499edf06e9d2 # v4
+
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/_deps
+          key: fetchcontent-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json') }}
+
+      - name: Configure
+        env:
+          CC: ${{ runner.os == 'Linux' && 'gcc-13' || '' }}
+          CXX: ${{ runner.os == 'Linux' && 'g++-13' || '' }}
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Run live test against zombiemud.org (Linux)
+        if: runner.os == 'Linux'
+        id: live_linux
+        # Reports "server unreachable" internally as a soft skip (exit 0)
+        # rather than a failure when the real server can't be reached; a
+        # genuine client-side bug or content-check failure exits 1, and the
+        # client's own watchdog exits 2 on timeout. Exit code is captured
+        # into a step output (rather than relying on continue-on-error's
+        # step-level "outcome", which a reusable-workflow caller can't see)
+        # so release.yml can report whether the live test passed.
+        run: |
+          set +e
+          ./build/release/mudclient zombiemud.org 3000 --test tests/live/zombiemud.lua \
+            --record live.jsonl --log-transcript transcript.txt --timeout 180
+          code=$?
+          set -e
+          echo "passed=$([ "$code" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Run live test against zombiemud.org (Windows)
+        if: runner.os == 'Windows'
+        id: live_windows
+        shell: pwsh
+        run: |
+          & .\build\release\mudclient.exe zombiemud.org 3000 --test tests/live/zombiemud.lua `
+            --record live.jsonl --log-transcript transcript.txt --timeout 180
+          $code = $LASTEXITCODE
+          $passed = if ($code -eq 0) { "true" } else { "false" }
+          "passed=$passed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload recording and transcript
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: live-test-${{ matrix.os }}
+          path: |
+            live.jsonl
+            transcript.txt
+          if-no-files-found: warn

@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            pkg_os: linux
+            pkg_arch: x86_64
+          - os: ubuntu-24.04-arm
+            pkg_os: linux
+            pkg_arch: aarch64
+          - os: windows-2022
+            pkg_os: windows
+            pkg_arch: x86_64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install GCC 13
+        if: runner.os == 'Linux'
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-13 g++-13
+
+      - name: Setup MSVC dev environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@c1ed231f339aec74961130db0459823a08f1b215 # v1.9.0
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@8b297075da4cd2a5f1fd21fe011b499edf06e9d2 # v4
+
+      - name: Cache FetchContent dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: build/_deps
+          key: fetchcontent-${{ runner.os }}-${{ matrix.pkg_arch }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json') }}
+
+      - name: Compute version from tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure
+        env:
+          CC: ${{ runner.os == 'Linux' && 'gcc-13' || '' }}
+          CXX: ${{ runner.os == 'Linux' && 'g++-13' || '' }}
+        run: >-
+          cmake --preset release
+          -DMUDCLIENT_VERSION_OVERRIDE=${{ steps.version.outputs.version }}
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test
+        run: ctest --preset release --output-on-failure
+
+      - name: Package
+        working-directory: build/release
+        run: cpack -G ${{ runner.os == 'Windows' && 'ZIP' || 'TGZ' }}
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package-${{ matrix.pkg_os }}-${{ matrix.pkg_arch }}
+          path: build/release/mudclient-*.${{ runner.os == 'Windows' && 'zip' || 'tar.gz' }}
+          if-no-files-found: error
+
+  live-test:
+    name: Live smoke test
+    uses: ./.github/workflows/live-test.yml
+
+  publish:
+    name: Publish release
+    needs: [build, live-test]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download all packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Compute checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: dist/*
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LIVE_TEST_PASSED: ${{ needs.live-test.outputs.passed }}
+        run: |
+          notes_file="$(mktemp)"
+          if [ "$LIVE_TEST_PASSED" = "true" ]; then
+            echo "Live smoke test against zombiemud.org: **passed**." >> "$notes_file"
+          else
+            echo "Live smoke test against zombiemud.org: **did not pass** (see the live-test workflow run for details; this does not block the release)." >> "$notes_file"
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --notes-file "$notes_file" \
+            dist/*

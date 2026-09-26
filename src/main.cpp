@@ -305,7 +305,19 @@ int main(int argc, char** argv) {
 
     // ---- Shutdown ----
     stdin_stop = true;
-    asio::post(network_io, [&network] { network->disconnect(); });
+    // Resetting the work guard alone doesn't make io_context::run() return:
+    // a still-armed repeating timer (e.g. a script's own client.register_timer)
+    // is itself outstanding async work regardless of the guard, so run()
+    // would block on network_thread.join() until that timer's next deadline.
+    // Stopping the io_context explicitly abandons any such pending
+    // operations without invoking them, which is fine here since the
+    // process is exiting; disconnect() itself is fully synchronous, so
+    // running it before stop() in the same posted task still gets a clean
+    // socket shutdown first.
+    asio::post(network_io, [&network, &network_io] {
+        network->disconnect();
+        network_io.stop();
+    });
     if (stdin_thread.joinable()) {
         // The stdin thread is blocked in std::getline with no portable way
         // to interrupt it; detach rather than join so process exit isn't

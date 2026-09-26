@@ -46,9 +46,27 @@ client.on("line", function(line)
     end
 end)
 
+-- Connection refused/timeout before the login screen is a skip, not a
+-- failure (docs/SPEC.md section 5): distinguished from a slow-but-live
+-- server by whether a 'disconnect' event ever arrives before we've seen
+-- a single 'connect' event.
+local ever_connected = false
+local disconnected_before_connect = false
+client.on("connect", function() ever_connected = true end)
+client.on("disconnect", function()
+    if not ever_connected then
+        disconnected_before_connect = true
+    end
+end)
+
 client.run_test(function()
     -- 1. I/O: wait for the login screen, visit without creating a character.
     local caps = client.wait_for([[Enter \(c\)reate or \(v\)isit]], 10)
+    if caps == nil and disconnected_before_connect then
+        client.echo("SKIP: server unreachable")
+        client.exit(0)
+        return
+    end
     check("login screen seen", caps ~= nil)
     client.send("v")
     caps = client.wait_for([[step into the world]], 10)
